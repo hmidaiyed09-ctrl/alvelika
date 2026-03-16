@@ -104,50 +104,63 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     // Ignore clicks on our own elements
     if (e.target.closest('.alvelika-bubble') || e.target.closest('.alvelika-tooltip')) return;
 
-    const selection = window.getSelection();
-    const selectedText = selection.toString().trim();
+    // Small delay so the selection is finalized
+    setTimeout(() => {
+      const selection = window.getSelection();
+      const selectedText = selection.toString().trim();
 
-    cleanup();
-
-    if (!selectedText || selectedText.length < 2 || selectedText.length > 5000) return;
-
-    // Get position from the selection range
-    const range = selection.getRangeAt(0);
-    const rect = range.getBoundingClientRect();
-
-    bubble = document.createElement('div');
-    bubble.className = 'alvelika-bubble';
-    bubble.innerHTML = `<img src="${logoUrl}" alt="Translate">`;
-
-    // Position the bubble at top-right of selection
-    bubble.style.left = (window.scrollX + rect.right + 6) + 'px';
-    bubble.style.top = (window.scrollY + rect.top - 8) + 'px';
-
-    bubble.addEventListener('click', (ev) => {
-      ev.stopPropagation();
       removeBubble();
-      showTranslation(selectedText, rect);
-    });
 
-    document.body.appendChild(bubble);
+      if (!selectedText || selectedText.length < 2 || selectedText.length > 5000) return;
+
+      // Get the very last rect of the selection (= end of highlighted text)
+      const range = selection.getRangeAt(0);
+      const rects = range.getClientRects();
+      const lastRect = rects[rects.length - 1];
+      if (!lastRect) return;
+
+      bubble = document.createElement('div');
+      bubble.className = 'alvelika-bubble';
+      bubble.innerHTML = `<img src="${logoUrl}" alt="Translate">`;
+
+      // Position right after the last character of the selection
+      bubble.style.left = (window.scrollX + lastRect.right + 6) + 'px';
+      bubble.style.top = (window.scrollY + lastRect.top + (lastRect.height / 2) - 14) + 'px';
+
+      bubble.addEventListener('mousedown', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+      });
+
+      bubble.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        const bubbleLeft = parseInt(bubble.style.left);
+        const bubbleTop = parseInt(bubble.style.top);
+        removeBubble();
+        showTranslation(selectedText, bubbleLeft, bubbleTop + 36);
+      });
+
+      document.body.appendChild(bubble);
+    }, 10);
   });
 
-  // Click anywhere else to dismiss
+  // Click anywhere else to dismiss — but not on our elements
   document.addEventListener('mousedown', (e) => {
     if (e.target.closest('.alvelika-bubble') || e.target.closest('.alvelika-tooltip')) return;
-    cleanup();
+    removeTooltip();
+    // Don't remove bubble here — mouseup will handle it after selection changes
   });
 
-  async function showTranslation(text, rect) {
+  async function showTranslation(text, posX, posY) {
     removeTooltip();
 
     tooltip = document.createElement('div');
     tooltip.className = 'alvelika-tooltip loading';
     tooltip.textContent = 'Translating…';
 
-    // Position below the selection
-    tooltip.style.left = (window.scrollX + rect.left) + 'px';
-    tooltip.style.top = (window.scrollY + rect.bottom + 8) + 'px';
+    // Position below where the bubble was
+    tooltip.style.left = posX + 'px';
+    tooltip.style.top = posY + 'px';
     document.body.appendChild(tooltip);
 
     // Get target language from settings
