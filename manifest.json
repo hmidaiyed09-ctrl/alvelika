@@ -31,6 +31,12 @@
       "js": ["content.js"]
     }
   ],
+  "web_accessible_resources": [
+    {
+      "resources": ["logo.png"],
+      "matches": ["<all_urls>"]
+    }
+  ],
   "icons": {
     "16": "logo.png",
     "48": "logo.png",
