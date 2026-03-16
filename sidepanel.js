@@ -9,6 +9,7 @@ const imagePreviewContainer = document.getElementById('image-preview-container')
 
 let userHasScrolledUp = false;
 let selectedImage = null;
+let conversationHistory = [];
 
 // intelligent scroll flag
 chatContainer.addEventListener('scroll', () => {
@@ -68,6 +69,7 @@ settingsButton.addEventListener('click', () => {
 // Clear Chat logic
 clearButton.addEventListener('click', () => {
   chatContainer.innerHTML = '';
+  conversationHistory = [];
   const welcome = document.createElement('div');
   welcome.className = 'welcome';
   welcome.innerHTML = `
@@ -291,15 +293,12 @@ Example:
 <answer>### Hello! 
 I see you're watching a fascinating video about **Fuel** by *Al-Dahih*. How can I help you explore this topic today?</answer>`;
 
+  // Push user message into conversation history
+  conversationHistory.push({ role: 'user', content: userContent });
+
   const messages = [
-    {
-      role: 'system',
-      content: systemPrompt
-    },
-    {
-      role: 'user',
-      content: userContent
-    }
+    { role: 'system', content: systemPrompt },
+    ...conversationHistory
   ];
 
   try {
@@ -351,6 +350,9 @@ I see you're watching a fascinating video about **Fuel** by *Al-Dahih*. How can 
     const answerDiv = document.createElement('div');
     answerDiv.className = 'message ai stream-text';
     chatContainer.appendChild(answerDiv);
+
+    // Push AI response into conversation history
+    conversationHistory.push({ role: 'assistant', content: rawResult });
 
     streamText(finalAnswer, answerDiv);
 
