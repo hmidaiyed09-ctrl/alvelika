@@ -150,6 +150,12 @@ async function handleSend() {
   imageUpload.value = '';
   updateSendButtonColor();
 
+  // If agent mode is active, run the agent loop instead
+  if (agentModeActive) {
+    await startAgentLoop(text);
+    return;
+  }
+
   // Extract page context (ON-DEMAND SCRAPER)
   let pageContext = 'No context available.';
   try {
@@ -235,22 +241,18 @@ function createThinkingState() {
   return el;
 }
 
-async function processLLMResponse(userMessage, contextData, thinkingEl, imageUrl, screenshotUrl) {
-  // 1. Get current config
+// ─── Shared: Build API config from saved settings ────────
+async function getApiConfig() {
   const config = await new Promise((resolve) => {
     chrome.storage.local.get(['provider', 'apiKey', 'customUrl', 'modelId'], resolve);
   });
 
   if (!config.provider || (!config.apiKey && config.provider !== 'pollinations')) {
-    thinkingEl.textContent = 'Error: Please configure AI provider and API key in settings.';
-    return;
+    return null;
   }
 
-  // 2. Prepare API details based on provider
   let baseUrl = '';
-  let headers = {
-    'Content-Type': 'application/json'
-  };
+  let headers = { 'Content-Type': 'application/json' };
 
   switch (config.provider) {
     case 'pollinations':
@@ -278,6 +280,30 @@ async function processLLMResponse(userMessage, contextData, thinkingEl, imageUrl
   }
 
   const model = config.modelId || (config.provider === 'pollinations' ? 'openai' : 'gpt-4o-mini');
+  return { baseUrl, headers, model };
+}
+
+// ─── Shared: Make an LLM API call ────────────────────────
+async function callLLM(apiConfig, messages) {
+  const response = await fetch(apiConfig.baseUrl, {
+    method: 'POST',
+    headers: apiConfig.headers,
+    body: JSON.stringify({ model: apiConfig.model, messages, stream: false })
+  });
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData.error?.message || `API Error: ${response.status}`);
+  }
+  const data = await response.json();
+  return data.choices[0].message.content.trim();
+}
+
+async function processLLMResponse(userMessage, contextData, thinkingEl, imageUrl, screenshotUrl) {
+  const apiConfig = await getApiConfig();
+  if (!apiConfig) {
+    thinkingEl.textContent = 'Error: Please configure AI provider and API key in settings.';
+    return;
+  }
 
   // Prepare user content (text and potentially image)
   const userContent = [];
@@ -326,23 +352,7 @@ I see you're watching a fascinating video about **Fuel** by *Al-Dahih*. How can 
   ];
 
   try {
-    const response = await fetch(baseUrl, {
-      method: 'POST',
-      headers: headers,
-      body: JSON.stringify({
-        model: model,
-        messages: messages,
-        stream: false
-      })
-    });
-
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.error?.message || `API Error: ${response.status}`);
-    }
-
-    const data = await response.json();
-    const rawResult = data.choices[0].message.content.trim();
+    const rawResult = await callLLM(apiConfig, messages);
 
     let thinkingText = "Analyzing context...";
     let finalAnswer = "";
@@ -384,6 +394,242 @@ I see you're watching a fascinating video about **Fuel** by *Al-Dahih*. How can 
     thinkingEl.textContent = `Error: ${err.message}`;
     console.error('LLM Request failed:', err);
   }
+}
+
+// ═══════════════════════════════════════════════════════════
+//  AGENT MODE — Autonomous Web Agent Loop
+// ═══════════════════════════════════════════════════════════
+
+// Helper: post a styled status line into the chat
+function appendAgentStatus(text, type = 'info') {
+  const div = document.createElement('div');
+  div.className = 'message ai agent-status';
+  const colors = { info: '#888', action: '#8A2BE2', success: '#4CAF50', error: '#ff6b6b' };
+  div.style.color = colors[type] || colors.info;
+  div.style.fontStyle = 'italic';
+  div.style.fontSize = '13px';
+  div.textContent = text;
+  chatContainer.appendChild(div);
+  scrollToBottom();
+  return div;
+}
+
+// Helper: send message to the content script on the active tab
+async function sendToContentScript(message) {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab || !tab.id) throw new Error('No active tab');
+  return await chrome.tabs.sendMessage(tab.id, message);
+}
+
+async function startAgentLoop(userGoal) {
+  const apiConfig = await getApiConfig();
+  if (!apiConfig) {
+    appendAgentStatus('Error: Configure your AI provider in Settings first.', 'error');
+    return;
+  }
+
+  appendAgentStatus(`🎯 Goal: "${userGoal}"`, 'info');
+  appendAgentStatus('Agent starting…', 'info');
+
+  let isDone = false;
+  let stepCount = 0;
+  const MAX_STEPS = 15;
+  let consecutiveErrors = 0;
+
+  while (!isDone && stepCount < MAX_STEPS) {
+    stepCount++;
+    appendAgentStatus(`── Step ${stepCount} / ${MAX_STEPS} ──`, 'info');
+
+    try {
+      // ── PHASE A: Observe ──────────────────────────────
+      appendAgentStatus('Scanning page elements…', 'info');
+
+      // 1. Draw markers and get the element map
+      let elementMap = [];
+      try {
+        const drawResult = await sendToContentScript({ action: 'drawMarkers' });
+        elementMap = drawResult?.elementMap || [];
+      } catch (e) {
+        appendAgentStatus('Could not scan page — injecting content script…', 'error');
+        break;
+      }
+
+      appendAgentStatus(`Found ${elementMap.length} interactive elements.`, 'info');
+
+      // 2. Wait for UI to settle
+      await new Promise(r => setTimeout(r, 300));
+
+      // 3. Capture screenshot with badges visible
+      let screenshot = null;
+      try {
+        const res = await chrome.runtime.sendMessage({ action: 'captureScreen' });
+        if (res?.screenshot) screenshot = res.screenshot;
+      } catch (e) {
+        console.log('Screenshot failed:', e);
+      }
+
+      // 4. Remove markers
+      try { await sendToContentScript({ action: 'removeMarkers' }); } catch (e) {}
+
+      // ── PHASE B: Strategist ───────────────────────────
+      appendAgentStatus('Strategist is analyzing the page…', 'action');
+
+      const strategistPrompt = `You are the Strategist for an Autonomous Web Agent. The user's goal is: '${userGoal}'.
+Look at the provided screenshot of the webpage. Notice the numbered yellow badges on interactive elements.
+You must output a highly detailed analysis answering these specific questions:
+1. What is the current state of the screen?
+2. Has the user's goal been reached? If yes, say "GOAL_REACHED" clearly.
+3. To reach the goal, what is the exact next step we should take and why?
+4. Are there alternative approaches if this fails?
+Output your analysis as a clear text plan.`;
+
+      const strategistContent = [
+        { type: 'text', text: `Element Map: ${JSON.stringify(elementMap)}` }
+      ];
+      if (screenshot) {
+        strategistContent.push({
+          type: 'image_url',
+          image_url: { url: screenshot, detail: 'low' }
+        });
+      }
+
+      const strategyText = await callLLM(apiConfig, [
+        { role: 'system', content: strategistPrompt },
+        { role: 'user', content: strategistContent }
+      ]);
+
+      // Check if strategist says goal is reached
+      if (strategyText.includes('GOAL_REACHED')) {
+        isDone = true;
+        appendAgentStatus('✅ Strategist confirms: goal has been reached!', 'success');
+        const doneDiv = document.createElement('div');
+        doneDiv.className = 'message ai stream-text';
+        chatContainer.appendChild(doneDiv);
+        streamText(strategyText, doneDiv);
+        break;
+      }
+
+      // ── PHASE C: Actor ────────────────────────────────
+      appendAgentStatus('Actor is deciding the next action…', 'action');
+
+      const actorPrompt = `You are the Executor. Your goal is: '${userGoal}'.
+Here is the Strategist's analysis of the current screen:
+<strategy>
+${strategyText}
+</strategy>
+Here is the map of interactive elements: ${JSON.stringify(elementMap)}.
+
+Based on the strategy, choose the single best action.
+You MUST output ONLY a raw JSON object (no markdown, no backticks) with these keys:
+- "thinking": your final verification reasoning
+- "action": one of CLICK(id), TYPE(id, 'text'), SCROLL_DOWN, or DONE(message)
+
+Examples:
+{"thinking":"The search box is #3, I need to type the query.","action":"TYPE(3, 'flights to Paris')"}
+{"thinking":"The submit button is #7.","action":"CLICK(7)"}
+{"thinking":"The goal is complete.","action":"DONE(Successfully completed the task)"}`;
+
+      const actorRaw = await callLLM(apiConfig, [
+        { role: 'system', content: actorPrompt },
+        { role: 'user', content: 'Execute the next action based on the strategy.' }
+      ]);
+
+      // ── PHASE D: Parse & Execute ──────────────────────
+      // Aggressively clean the actor's output
+      let cleanJson = actorRaw.replace(/```json/gi, '').replace(/```/g, '').trim();
+      const firstBrace = cleanJson.indexOf('{');
+      const lastBrace = cleanJson.lastIndexOf('}');
+      if (firstBrace !== -1 && lastBrace !== -1) {
+        cleanJson = cleanJson.substring(firstBrace, lastBrace + 1);
+      }
+
+      let parsed;
+      try {
+        parsed = JSON.parse(cleanJson);
+      } catch (e) {
+        appendAgentStatus(`Failed to parse actor response. Retrying…`, 'error');
+        consecutiveErrors++;
+        if (consecutiveErrors >= 3) {
+          appendAgentStatus('Too many parsing errors. Agent stopped.', 'error');
+          break;
+        }
+        continue;
+      }
+
+      consecutiveErrors = 0; // reset on success
+      const actionStr = parsed.action || '';
+
+      // DONE
+      const doneMatch = actionStr.match(/^DONE\((.+)\)$/i);
+      if (doneMatch) {
+        isDone = true;
+        appendAgentStatus(`✅ ${doneMatch[1]}`, 'success');
+        break;
+      }
+
+      // CLICK
+      const clickMatch = actionStr.match(/^CLICK\((\d+)\)$/i);
+      if (clickMatch) {
+        const id = parseInt(clickMatch[1]);
+        appendAgentStatus(`🖱️ Clicking element #${id}…`, 'action');
+        try {
+          await sendToContentScript({ action: 'executeAction', actionType: 'CLICK', id });
+        } catch (e) {
+          appendAgentStatus(`Click failed: ${e.message}`, 'error');
+        }
+        await new Promise(r => setTimeout(r, 2500));
+        continue;
+      }
+
+      // TYPE
+      const typeMatch = actionStr.match(/^TYPE\((\d+),\s*'(.+?)'\)$/i) || actionStr.match(/^TYPE\((\d+),\s*"(.+?)"\)$/i);
+      if (typeMatch) {
+        const id = parseInt(typeMatch[1]);
+        const text = typeMatch[2];
+        appendAgentStatus(`⌨️ Typing "${text}" into element #${id}…`, 'action');
+        try {
+          await sendToContentScript({ action: 'executeAction', actionType: 'TYPE', id, textValue: text });
+        } catch (e) {
+          appendAgentStatus(`Type failed: ${e.message}`, 'error');
+        }
+        await new Promise(r => setTimeout(r, 2500));
+        continue;
+      }
+
+      // SCROLL_DOWN
+      if (actionStr.includes('SCROLL_DOWN')) {
+        appendAgentStatus('📜 Scrolling down…', 'action');
+        try {
+          await chrome.scripting.executeScript({
+            target: { tabId: (await chrome.tabs.query({ active: true, currentWindow: true }))[0].id },
+            func: () => window.scrollBy(0, window.innerHeight * 0.7)
+          });
+        } catch (e) {}
+        await new Promise(r => setTimeout(r, 1500));
+        continue;
+      }
+
+      // Unknown action
+      appendAgentStatus(`Unknown action: "${actionStr}". Retrying…`, 'error');
+      consecutiveErrors++;
+      if (consecutiveErrors >= 3) break;
+
+    } catch (err) {
+      appendAgentStatus(`Error: ${err.message}`, 'error');
+      consecutiveErrors++;
+      if (consecutiveErrors >= 3) {
+        appendAgentStatus('Too many consecutive errors. Agent stopped.', 'error');
+        break;
+      }
+      await new Promise(r => setTimeout(r, 1000));
+    }
+  }
+
+  if (stepCount >= MAX_STEPS && !isDone) {
+    appendAgentStatus(`Agent reached the ${MAX_STEPS}-step limit without completing the goal.`, 'error');
+  }
+
+  appendAgentStatus('Agent session ended.', 'info');
 }
 
 function streamText(fullText, container) {
