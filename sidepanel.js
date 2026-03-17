@@ -6,10 +6,19 @@ const settingsButton = document.getElementById('settings-button');
 const uploadButton = document.getElementById('upload-button');
 const imageUpload = document.getElementById('image-upload');
 const imagePreviewContainer = document.getElementById('image-preview-container');
+const agentModeButton = document.getElementById('agent-mode-button');
 
 let userHasScrolledUp = false;
 let selectedImage = null;
 let conversationHistory = [];
+let agentModeActive = false;
+
+// Agent Mode toggle (UI only — functionality coming soon)
+agentModeButton.addEventListener('click', () => {
+  agentModeActive = !agentModeActive;
+  agentModeButton.classList.toggle('active', agentModeActive);
+  chatInput.placeholder = agentModeActive ? 'Agent mode — give me a task…' : 'Ask anything…';
+});
 
 // intelligent scroll flag
 chatContainer.addEventListener('scroll', () => {
@@ -181,12 +190,21 @@ async function handleSend() {
     pageContext = "Error extracting context. Assume general conversation.";
   }
 
+  // Capture screenshot of the active tab
+  let screenshotUrl = null;
+  try {
+    const res = await chrome.runtime.sendMessage({ action: 'captureScreen' });
+    if (res && res.screenshot) screenshotUrl = res.screenshot;
+  } catch (err) {
+    console.log('Could not capture screenshot:', err);
+  }
+
   // Show thinking
   const thinkingEl = createThinkingState();
   chatContainer.appendChild(thinkingEl);
   scrollToBottom();
 
-  await processLLMResponse(text, pageContext, thinkingEl, currentImage);
+  await processLLMResponse(text, pageContext, thinkingEl, currentImage, screenshotUrl);
 }
 
 function appendUserMessage(text, imageUrl) {
@@ -217,7 +235,7 @@ function createThinkingState() {
   return el;
 }
 
-async function processLLMResponse(userMessage, contextData, thinkingEl, imageUrl) {
+async function processLLMResponse(userMessage, contextData, thinkingEl, imageUrl, screenshotUrl) {
   // 1. Get current config
   const config = await new Promise((resolve) => {
     chrome.storage.local.get(['provider', 'apiKey', 'customUrl', 'modelId'], resolve);
@@ -272,9 +290,15 @@ async function processLLMResponse(userMessage, contextData, thinkingEl, imageUrl
       image_url: { url: imageUrl }
     });
   }
+  if (screenshotUrl) {
+    userContent.push({
+      type: 'image_url',
+      image_url: { url: screenshotUrl, detail: 'low' }
+    });
+  }
 
   const systemPrompt = `You are Alvelika, a sophisticated and proactive AI research assistant. 
-You are "watching" the screen with the user.
+You are "watching" the screen with the user. You receive both the page's text AND a screenshot of what they currently see.
 
 CURRENT PAGE CONTEXT:
 <page_context>

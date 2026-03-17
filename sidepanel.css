@@ -377,6 +377,32 @@ body {
   background: rgba(255, 255, 255, 0.06);
 }
 
+/* Agent Mode Toggle */
+#agent-mode-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: none;
+  background: transparent;
+  color: #555;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: color 0.2s ease, background 0.2s ease;
+}
+
+#agent-mode-button:hover {
+  color: #EAEAEA;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+#agent-mode-button.active {
+  color: #8A2BE2;
+  background: rgba(138, 43, 226, 0.12);
+}
+
 /* ───────────────────────────────────────────────
    MARKDOWN STYLING — Alvelika Responses
    ─────────────────────────────────────────────── */

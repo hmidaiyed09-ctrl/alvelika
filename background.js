@@ -7,11 +7,21 @@ chrome.runtime.onInstalled.addListener(() => {
   console.log("Alvelika installed and ready to assist.");
 });
 
-// Handle translation requests from content script
+// Handle messages from sidepanel and content script
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'translate') {
     handleTranslation(request.text, request.targetLang).then(sendResponse);
-    return true; // async response
+    return true;
+  }
+  if (request.action === 'captureScreen') {
+    chrome.tabs.captureVisibleTab(null, { format: 'jpeg', quality: 60 }, (dataUrl) => {
+      if (chrome.runtime.lastError) {
+        sendResponse({ error: chrome.runtime.lastError.message });
+      } else {
+        sendResponse({ screenshot: dataUrl });
+      }
+    });
+    return true;
   }
 });
 
