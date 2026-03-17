@@ -12,9 +12,20 @@ let userHasScrolledUp = false;
 let selectedImage = null;
 let conversationHistory = [];
 let agentModeActive = false;
+let isAgentRunning = false;
+let cancelAgent = false;
 
-// Agent Mode toggle (UI only — functionality coming soon)
+// SVG Icons for the Agent Button
+const agentIconNormal = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a4 4 0 0 1 4 4v2a4 4 0 0 1-8 0V6a4 4 0 0 1 4-4z"/><path d="M18 14c2 1 3 3 3 5v2H3v-2c0-2 1-4 3-5"/><circle cx="12" cy="6" r="1"/></svg>`;
+const agentIconStop = `<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" color="#ff4d4d"><rect x="6" y="6" width="12" height="12"></rect></svg>`;
+
+// Agent Mode toggle / STOP Button
 agentModeButton.addEventListener('click', () => {
+  if (isAgentRunning) {
+    cancelAgent = true;
+    appendAgentStatus('🛑 Stopping agent...', 'error');
+    return;
+  }
   agentModeActive = !agentModeActive;
   agentModeButton.classList.toggle('active', agentModeActive);
   chatInput.placeholder = agentModeActive ? 'Agent mode — give me a task…' : 'Ask anything…';
@@ -414,11 +425,23 @@ function appendAgentStatus(text, type = 'info') {
   return div;
 }
 
-// Helper: send message to the content script on the active tab
+// Helper: ensure content script is injected, then send message
 async function sendToContentScript(message) {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab || !tab.id) throw new Error('No active tab');
-  return await chrome.tabs.sendMessage(tab.id, message);
+
+  try {
+    return await chrome.tabs.sendMessage(tab.id, message);
+  } catch (e) {
+    // Content script not loaded — inject it first
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ['content.js']
+    });
+    // Small delay to let it initialize
+    await new Promise(r => setTimeout(r, 200));
+    return await chrome.tabs.sendMessage(tab.id, message);
+  }
 }
 
 async function startAgentLoop(userGoal) {
@@ -428,6 +451,11 @@ async function startAgentLoop(userGoal) {
     return;
   }
 
+  // --- STARTUP UI ---
+  isAgentRunning = true;
+  cancelAgent = false;
+  agentModeButton.innerHTML = agentIconStop;
+
   appendAgentStatus(`🎯 Goal: "${userGoal}"`, 'info');
   appendAgentStatus('Agent starting…', 'info');
 
@@ -436,30 +464,23 @@ async function startAgentLoop(userGoal) {
   const MAX_STEPS = 15;
   let consecutiveErrors = 0;
 
-  while (!isDone && stepCount < MAX_STEPS) {
+  while (!isDone && stepCount < MAX_STEPS && !cancelAgent) {
     stepCount++;
     appendAgentStatus(`── Step ${stepCount} / ${MAX_STEPS} ──`, 'info');
 
     try {
       // ── PHASE A: Observe ──────────────────────────────
+      if (cancelAgent) break;
       appendAgentStatus('Scanning page elements…', 'info');
 
-      // 1. Draw markers and get the element map
       let elementMap = [];
-      try {
-        const drawResult = await sendToContentScript({ action: 'drawMarkers' });
-        elementMap = drawResult?.elementMap || [];
-      } catch (e) {
-        appendAgentStatus('Could not scan page — injecting content script…', 'error');
-        break;
-      }
-
+      const drawResult = await sendToContentScript({ action: 'drawMarkers' });
+      elementMap = drawResult?.elementMap || [];
       appendAgentStatus(`Found ${elementMap.length} interactive elements.`, 'info');
 
-      // 2. Wait for UI to settle
-      await new Promise(r => setTimeout(r, 300));
+      await new Promise(r => setTimeout(r, 400));
+      if (cancelAgent) break;
 
-      // 3. Capture screenshot with badges visible
       let screenshot = null;
       try {
         const res = await chrome.runtime.sendMessage({ action: 'captureScreen' });
@@ -468,29 +489,26 @@ async function startAgentLoop(userGoal) {
         console.log('Screenshot failed:', e);
       }
 
-      // 4. Remove markers
       try { await sendToContentScript({ action: 'removeMarkers' }); } catch (e) {}
+      if (cancelAgent) break;
 
       // ── PHASE B: Strategist ───────────────────────────
       appendAgentStatus('Strategist is analyzing the page…', 'action');
 
       const strategistPrompt = `You are the Strategist for an Autonomous Web Agent. The user's goal is: '${userGoal}'.
-Look at the provided screenshot of the webpage. Notice the numbered yellow badges on interactive elements.
-You must output a highly detailed analysis answering these specific questions:
+Look at the provided screenshot. Notice the numbered yellow badges on interactive elements.
+Answer these questions:
 1. What is the current state of the screen?
-2. Has the user's goal been reached? If yes, say "GOAL_REACHED" clearly.
-3. To reach the goal, what is the exact next step we should take and why?
-4. Are there alternative approaches if this fails?
-Output your analysis as a clear text plan.`;
+2. Has the user's goal been reached?
+3. What is the exact next step?
 
-      const strategistContent = [
-        { type: 'text', text: `Element Map: ${JSON.stringify(elementMap)}` }
-      ];
+CRITICAL INSTRUCTION: You MUST end your analysis with exactly ONE of these tags:
+<status>DONE</status> (Use this ONLY if the user's goal is completely achieved)
+<status>CONTINUE</status> (Use this if we still need to click/type to reach the goal)`;
+
+      const strategistContent = [{ type: 'text', text: `Element Map: ${JSON.stringify(elementMap)}` }];
       if (screenshot) {
-        strategistContent.push({
-          type: 'image_url',
-          image_url: { url: screenshot, detail: 'low' }
-        });
+        strategistContent.push({ type: 'image_url', image_url: { url: screenshot, detail: 'low' } });
       }
 
       const strategyText = await callLLM(apiConfig, [
@@ -498,138 +516,117 @@ Output your analysis as a clear text plan.`;
         { role: 'user', content: strategistContent }
       ]);
 
-      // Check if strategist says goal is reached
-      if (strategyText.includes('GOAL_REACHED')) {
+      // Check the Idiot-Proof Tag
+      if (/<status>\s*DONE\s*<\/status>/i.test(strategyText) || strategyText.includes('GOAL_REACHED')) {
         isDone = true;
-        appendAgentStatus('✅ Strategist confirms: goal has been reached!', 'success');
+        appendAgentStatus('✅ Strategist confirms: task is complete!', 'success');
         const doneDiv = document.createElement('div');
         doneDiv.className = 'message ai stream-text';
         chatContainer.appendChild(doneDiv);
-        streamText(strategyText, doneDiv);
+        streamText(strategyText.replace(/<status>.*?<\/status>/gi, ''), doneDiv);
         break;
       }
+
+      if (cancelAgent) break;
 
       // ── PHASE C: Actor ────────────────────────────────
       appendAgentStatus('Actor is deciding the next action…', 'action');
 
-      const actorPrompt = `You are the Executor. Your goal is: '${userGoal}'.
-Here is the Strategist's analysis of the current screen:
-<strategy>
-${strategyText}
-</strategy>
-Here is the map of interactive elements: ${JSON.stringify(elementMap)}.
+      const actorPrompt = `You are the Executor. Goal: '${userGoal}'.
+Strategist's analysis:
+<strategy>${strategyText}</strategy>
 
-Based on the strategy, choose the single best action.
-You MUST output ONLY a raw JSON object (no markdown, no backticks) with these keys:
-- "thinking": your final verification reasoning
-- "action": one of CLICK(id), TYPE(id, 'text'), SCROLL_DOWN, or DONE(message)
+Map of interactive elements: ${JSON.stringify(elementMap)}.
 
-Examples:
-{"thinking":"The search box is #3, I need to type the query.","action":"TYPE(3, 'flights to Paris')"}
-{"thinking":"The submit button is #7.","action":"CLICK(7)"}
-{"thinking":"The goal is complete.","action":"DONE(Successfully completed the task)"}`;
+Based on the strategy, output ONLY a raw JSON object (no markdown) with these keys:
+- "thinking": your reasoning
+- "action": ONE of CLICK(id), TYPE(id, 'text'), SCROLL_DOWN, or DONE(message)
+
+Example:
+{"thinking":"I need to search. Search box is #3.","action":"TYPE(3, 'cats')"}
+{"thinking":"The task is done.","action":"DONE(Finished)"}`;
 
       const actorRaw = await callLLM(apiConfig, [
         { role: 'system', content: actorPrompt },
-        { role: 'user', content: 'Execute the next action based on the strategy.' }
+        { role: 'user', content: 'Execute next action.' }
       ]);
 
+      if (cancelAgent) break;
+
       // ── PHASE D: Parse & Execute ──────────────────────
-      // Aggressively clean the actor's output
       let cleanJson = actorRaw.replace(/```json/gi, '').replace(/```/g, '').trim();
       const firstBrace = cleanJson.indexOf('{');
       const lastBrace = cleanJson.lastIndexOf('}');
-      if (firstBrace !== -1 && lastBrace !== -1) {
-        cleanJson = cleanJson.substring(firstBrace, lastBrace + 1);
-      }
+      if (firstBrace !== -1 && lastBrace !== -1) cleanJson = cleanJson.substring(firstBrace, lastBrace + 1);
 
       let parsed;
       try {
         parsed = JSON.parse(cleanJson);
       } catch (e) {
-        appendAgentStatus(`Failed to parse actor response. Retrying…`, 'error');
+        appendAgentStatus(`Failed to parse actor JSON. Retrying…`, 'error');
         consecutiveErrors++;
-        if (consecutiveErrors >= 3) {
-          appendAgentStatus('Too many parsing errors. Agent stopped.', 'error');
-          break;
-        }
+        if (consecutiveErrors >= 3) break;
         continue;
       }
 
-      consecutiveErrors = 0; // reset on success
+      consecutiveErrors = 0;
       const actionStr = parsed.action || '';
 
-      // DONE
-      const doneMatch = actionStr.match(/^DONE\((.+)\)$/i);
-      if (doneMatch) {
+      if (actionStr.match(/^DONE\((.+)\)$/i)) {
         isDone = true;
-        appendAgentStatus(`✅ ${doneMatch[1]}`, 'success');
+        appendAgentStatus(`✅ Done`, 'success');
         break;
       }
 
-      // CLICK
       const clickMatch = actionStr.match(/^CLICK\((\d+)\)$/i);
       if (clickMatch) {
-        const id = parseInt(clickMatch[1]);
-        appendAgentStatus(`🖱️ Clicking element #${id}…`, 'action');
-        try {
-          await sendToContentScript({ action: 'executeAction', actionType: 'CLICK', id });
-        } catch (e) {
-          appendAgentStatus(`Click failed: ${e.message}`, 'error');
-        }
+        appendAgentStatus(`🖱️ Clicking element #${clickMatch[1]}…`, 'action');
+        await sendToContentScript({ action: 'executeAction', actionType: 'CLICK', id: parseInt(clickMatch[1]) });
         await new Promise(r => setTimeout(r, 2500));
         continue;
       }
 
-      // TYPE
       const typeMatch = actionStr.match(/^TYPE\((\d+),\s*'(.+?)'\)$/i) || actionStr.match(/^TYPE\((\d+),\s*"(.+?)"\)$/i);
       if (typeMatch) {
-        const id = parseInt(typeMatch[1]);
-        const text = typeMatch[2];
-        appendAgentStatus(`⌨️ Typing "${text}" into element #${id}…`, 'action');
-        try {
-          await sendToContentScript({ action: 'executeAction', actionType: 'TYPE', id, textValue: text });
-        } catch (e) {
-          appendAgentStatus(`Type failed: ${e.message}`, 'error');
-        }
+        appendAgentStatus(`⌨️ Typing "${typeMatch[2]}" into #${typeMatch[1]}…`, 'action');
+        await sendToContentScript({ action: 'executeAction', actionType: 'TYPE', id: parseInt(typeMatch[1]), textValue: typeMatch[2] });
         await new Promise(r => setTimeout(r, 2500));
         continue;
       }
 
-      // SCROLL_DOWN
       if (actionStr.includes('SCROLL_DOWN')) {
         appendAgentStatus('📜 Scrolling down…', 'action');
-        try {
-          await chrome.scripting.executeScript({
-            target: { tabId: (await chrome.tabs.query({ active: true, currentWindow: true }))[0].id },
-            func: () => window.scrollBy(0, window.innerHeight * 0.7)
-          });
-        } catch (e) {}
+        await chrome.scripting.executeScript({
+          target: { tabId: (await chrome.tabs.query({ active: true, currentWindow: true }))[0].id },
+          func: () => window.scrollBy(0, window.innerHeight * 0.7)
+        });
         await new Promise(r => setTimeout(r, 1500));
         continue;
       }
 
-      // Unknown action
-      appendAgentStatus(`Unknown action: "${actionStr}". Retrying…`, 'error');
+      appendAgentStatus(`Unknown action: "${actionStr}"`, 'error');
       consecutiveErrors++;
       if (consecutiveErrors >= 3) break;
 
     } catch (err) {
       appendAgentStatus(`Error: ${err.message}`, 'error');
       consecutiveErrors++;
-      if (consecutiveErrors >= 3) {
-        appendAgentStatus('Too many consecutive errors. Agent stopped.', 'error');
-        break;
-      }
+      if (consecutiveErrors >= 3) break;
       await new Promise(r => setTimeout(r, 1000));
     }
   }
 
-  if (stepCount >= MAX_STEPS && !isDone) {
-    appendAgentStatus(`Agent reached the ${MAX_STEPS}-step limit without completing the goal.`, 'error');
+  // --- CLEANUP UI ---
+  if (cancelAgent) {
+    appendAgentStatus('Agent manually aborted by user.', 'error');
+    try { await sendToContentScript({ action: 'removeMarkers' }); } catch (e) {}
+  } else if (!isDone) {
+    appendAgentStatus(`Agent stopped (Reached ${MAX_STEPS} steps or errored out).`, 'error');
   }
 
-  appendAgentStatus('Agent session ended.', 'info');
+  isAgentRunning = false;
+  cancelAgent = false;
+  agentModeButton.innerHTML = agentIconNormal;
 }
 
 function streamText(fullText, container) {
