@@ -23,7 +23,6 @@ const agentIconStop = `<svg width="18" height="18" viewBox="0 0 24 24" fill="cur
 agentModeButton.addEventListener('click', () => {
   if (isAgentRunning) {
     cancelAgent = true;
-    appendAgentStatus('🛑 Stopping agent...', 'error');
     return;
   }
   agentModeActive = !agentModeActive;
@@ -171,28 +170,22 @@ async function handleSend() {
   let pageContext = 'No context available.';
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    
-    // Check if it's a restricted Chrome page
+
     if (tab && tab.id && tab.url && (tab.url.startsWith('chrome://') || tab.url.startsWith('edge://') || tab.url.startsWith('about:'))) {
       pageContext = "The user is on a restricted browser page (like a New Tab). You cannot see this page.";
-    } 
-    // If it's a normal website, aggressively scrape it
-    else if (tab && tab.id) {
+    } else if (tab && tab.id) {
       const injectionResults = await chrome.scripting.executeScript({
         target: { tabId: tab.id },
         func: () => {
           let text = '';
           const article = document.querySelector('article');
           const main = document.querySelector('main') || document.querySelector('[role="main"]');
-          
-          // Smart Cascading Fallback
           if (article) { text = article.innerText; }
           else if (main) { text = main.innerText; }
           else { text = document.body.innerText; }
-          
           return {
             title: document.title,
-            text: text.substring(0, 15000) // Limit to 15k chars so the API doesn't crash
+            text: text.substring(0, 15000)
           };
         }
       });
@@ -217,7 +210,7 @@ async function handleSend() {
   }
 
   // Show thinking
-  const thinkingEl = createThinkingState();
+  const thinkingEl = createThinkingBubble();
   chatContainer.appendChild(thinkingEl);
   scrollToBottom();
 
@@ -227,7 +220,7 @@ async function handleSend() {
 function appendUserMessage(text, imageUrl) {
   const div = document.createElement('div');
   div.className = 'message user';
-  
+
   if (text) {
     const p = document.createElement('p');
     p.textContent = text;
@@ -245,10 +238,10 @@ function appendUserMessage(text, imageUrl) {
   scrollToBottom();
 }
 
-function createThinkingState() {
+function createThinkingBubble(initialText = 'thinking…') {
   const el = document.createElement('div');
   el.className = 'message ai thinking-state';
-  el.textContent = 'thinking…';
+  el.textContent = initialText;
   return el;
 }
 
@@ -316,22 +309,15 @@ async function processLLMResponse(userMessage, contextData, thinkingEl, imageUrl
     return;
   }
 
-  // Prepare user content (text and potentially image)
   const userContent = [];
   if (userMessage) {
     userContent.push({ type: 'text', text: userMessage });
   }
   if (imageUrl) {
-    userContent.push({
-      type: 'image_url',
-      image_url: { url: imageUrl }
-    });
+    userContent.push({ type: 'image_url', image_url: { url: imageUrl } });
   }
   if (screenshotUrl) {
-    userContent.push({
-      type: 'image_url',
-      image_url: { url: screenshotUrl, detail: 'low' }
-    });
+    userContent.push({ type: 'image_url', image_url: { url: screenshotUrl, detail: 'low' } });
   }
 
   const systemPrompt = `You are Alvelika, a sophisticated and proactive AI research assistant. 
@@ -354,7 +340,6 @@ Example:
 <answer>### Hello! 
 I see you're watching a fascinating video about **Fuel** by *Al-Dahih*. How can I help you explore this topic today?</answer>`;
 
-  // Push user message into conversation history
   conversationHistory.push({ role: 'user', content: userContent });
 
   const messages = [
@@ -368,35 +353,29 @@ I see you're watching a fascinating video about **Fuel** by *Al-Dahih*. How can 
     let thinkingText = "Analyzing context...";
     let finalAnswer = "";
 
-    // 1. Extract Thought using Regex
     const thoughtMatch = rawResult.match(/<thought>([\s\S]*?)<\/thought>/i);
     if (thoughtMatch) {
       thinkingText = thoughtMatch[1].trim();
     }
 
-    // 2. Extract Answer using Regex
     const answerMatch = rawResult.match(/<answer>([\s\S]*?)<\/answer>/i);
     if (answerMatch) {
       finalAnswer = answerMatch[1].trim();
     } else {
-      // Fallback: If the AI forgot the tags, just clean the raw result
       finalAnswer = rawResult.replace(/<thought>[\s\S]*?<\/thought>/gi, '').replace(/<\/?answer>/gi, '').trim();
     }
 
-    // Update thinking element
     thinkingEl.textContent = thinkingText;
-    
+
     await new Promise((r) => setTimeout(r, 800));
     thinkingEl.classList.add('fading-out');
     await new Promise((r) => setTimeout(r, 500));
     thinkingEl.remove();
 
-    // Create container for the beautiful formatted answer
     const answerDiv = document.createElement('div');
     answerDiv.className = 'message ai stream-text';
     chatContainer.appendChild(answerDiv);
 
-    // Push AI response into conversation history
     conversationHistory.push({ role: 'assistant', content: rawResult });
 
     streamText(finalAnswer, answerDiv);
@@ -407,23 +386,10 @@ I see you're watching a fascinating video about **Fuel** by *Al-Dahih*. How can 
   }
 }
 
-// ═══════════════════════════════════════════════════════════
-//  AGENT MODE — Autonomous Web Agent Loop
-// ═══════════════════════════════════════════════════════════
 
-// Helper: post a styled status line into the chat
-function appendAgentStatus(text, type = 'info') {
-  const div = document.createElement('div');
-  div.className = 'message ai agent-status';
-  const colors = { info: '#888', action: '#8A2BE2', success: '#4CAF50', error: '#ff6b6b' };
-  div.style.color = colors[type] || colors.info;
-  div.style.fontStyle = 'italic';
-  div.style.fontSize = '13px';
-  div.textContent = text;
-  chatContainer.appendChild(div);
-  scrollToBottom();
-  return div;
-}
+// ═══════════════════════════════════════════════════════════
+//  AGENT MODE — Clean Single-Bubble Autonomous Agent
+// ═══════════════════════════════════════════════════════════
 
 // Helper: ensure content script is injected, then send message
 async function sendToContentScript(message) {
@@ -433,50 +399,79 @@ async function sendToContentScript(message) {
   try {
     return await chrome.tabs.sendMessage(tab.id, message);
   } catch (e) {
-    // Content script not loaded — inject it first
     await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       files: ['content.js']
     });
-    // Small delay to let it initialize
     await new Promise(r => setTimeout(r, 200));
     return await chrome.tabs.sendMessage(tab.id, message);
   }
 }
 
+// Smoothly update the thinking bubble text with a tiny fade effect
+function updateThinkingText(bubble, newText) {
+  bubble.style.transition = 'opacity 0.15s ease';
+  bubble.style.opacity = '0.4';
+  setTimeout(() => {
+    bubble.textContent = newText;
+    bubble.style.opacity = '1';
+    scrollToBottom();
+  }, 150);
+}
+
+// Gracefully dismiss the thinking bubble
+async function dismissThinkingBubble(bubble) {
+  bubble.classList.add('fading-out');
+  await new Promise(r => setTimeout(r, 500));
+  if (bubble.parentNode) bubble.remove();
+}
+
+// Stream the final answer into the chat
+function appendFinalAnswer(text) {
+  const answerDiv = document.createElement('div');
+  answerDiv.className = 'message ai stream-text';
+  chatContainer.appendChild(answerDiv);
+  streamText(text, answerDiv);
+}
+
 async function startAgentLoop(userGoal) {
   const apiConfig = await getApiConfig();
   if (!apiConfig) {
-    appendAgentStatus('Error: Configure your AI provider in Settings first.', 'error');
+    const errDiv = document.createElement('div');
+    errDiv.className = 'message ai';
+    errDiv.textContent = '⚙️ Please configure your AI provider in Settings first.';
+    chatContainer.appendChild(errDiv);
+    scrollToBottom();
     return;
   }
 
-  // --- STARTUP UI ---
+  // ── UI STARTUP ─────────────────────────────────────────
   isAgentRunning = true;
   cancelAgent = false;
   agentModeButton.innerHTML = agentIconStop;
 
-  appendAgentStatus(`🎯 Goal: "${userGoal}"`, 'info');
-  appendAgentStatus('Agent starting…', 'info');
+  // ONE single thinking bubble — the only visible element
+  const thinkingBubble = createThinkingBubble('thinking…');
+  chatContainer.appendChild(thinkingBubble);
+  scrollToBottom();
 
   let isDone = false;
   let stepCount = 0;
   const MAX_STEPS = 15;
   let consecutiveErrors = 0;
+  let finalMessage = '';
 
   while (!isDone && stepCount < MAX_STEPS && !cancelAgent) {
     stepCount++;
-    appendAgentStatus(`── Step ${stepCount} / ${MAX_STEPS} ──`, 'info');
 
     try {
       // ── PHASE A: Observe ──────────────────────────────
       if (cancelAgent) break;
-      appendAgentStatus('Scanning page elements…', 'info');
+      updateThinkingText(thinkingBubble, 'scanning the page…');
 
       let elementMap = [];
       const drawResult = await sendToContentScript({ action: 'drawMarkers' });
       elementMap = drawResult?.elementMap || [];
-      appendAgentStatus(`Found ${elementMap.length} interactive elements.`, 'info');
 
       await new Promise(r => setTimeout(r, 400));
       if (cancelAgent) break;
@@ -489,11 +484,11 @@ async function startAgentLoop(userGoal) {
         console.log('Screenshot failed:', e);
       }
 
-      try { await sendToContentScript({ action: 'removeMarkers' }); } catch (e) {}
+      try { await sendToContentScript({ action: 'removeMarkers' }); } catch (e) { }
       if (cancelAgent) break;
 
       // ── PHASE B: Strategist ───────────────────────────
-      appendAgentStatus('Strategist is analyzing the page…', 'action');
+      updateThinkingText(thinkingBubble, 'analyzing what I see…');
 
       const strategistPrompt = `You are the Strategist for an Autonomous Web Agent. The user's goal is: '${userGoal}'.
 Look at the provided screenshot. Notice the numbered yellow badges on interactive elements.
@@ -504,7 +499,10 @@ Answer these questions:
 
 CRITICAL INSTRUCTION: You MUST end your analysis with exactly ONE of these tags:
 <status>DONE</status> (Use this ONLY if the user's goal is completely achieved)
-<status>CONTINUE</status> (Use this if we still need to click/type to reach the goal)`;
+<status>CONTINUE</status> (Use this if we still need to click/type to reach the goal)
+
+When DONE, also include a <summary> tag with a clean, user-friendly summary of what was accomplished. Use Markdown.
+Example: <summary>### Done! \\nI searched for **cats** on Google and found the top results for you.</summary>`;
 
       const strategistContent = [{ type: 'text', text: `Element Map: ${JSON.stringify(elementMap)}` }];
       if (screenshot) {
@@ -516,21 +514,32 @@ CRITICAL INSTRUCTION: You MUST end your analysis with exactly ONE of these tags:
         { role: 'user', content: strategistContent }
       ]);
 
-      // Check the Idiot-Proof Tag
+      // Update the bubble with what the strategist is actually thinking
+      const cleanStrategy = strategyText
+        .replace(/<status>[\s\S]*?<\/status>/gi, '')
+        .replace(/<summary>[\s\S]*?<\/summary>/gi, '')
+        .trim();
+      // Show only the first meaningful sentence so it stays compact
+      const firstLine = cleanStrategy.split(/\n/)[0].substring(0, 120);
+      updateThinkingText(thinkingBubble, firstLine || 'analyzing…');
+
+      // ── Check if DONE ─────────────────────────────────
       if (/<status>\s*DONE\s*<\/status>/i.test(strategyText) || strategyText.includes('GOAL_REACHED')) {
         isDone = true;
-        appendAgentStatus('✅ Strategist confirms: task is complete!', 'success');
-        const doneDiv = document.createElement('div');
-        doneDiv.className = 'message ai stream-text';
-        chatContainer.appendChild(doneDiv);
-        streamText(strategyText.replace(/<status>.*?<\/status>/gi, ''), doneDiv);
+        // Extract the pretty summary if provided
+        const summaryMatch = strategyText.match(/<summary>([\s\S]*?)<\/summary>/i);
+        if (summaryMatch) {
+          finalMessage = summaryMatch[1].trim();
+        } else {
+          finalMessage = `### ✅ Done!\n${cleanStrategy}`;
+        }
         break;
       }
 
       if (cancelAgent) break;
 
       // ── PHASE C: Actor ────────────────────────────────
-      appendAgentStatus('Actor is deciding the next action…', 'action');
+      updateThinkingText(thinkingBubble, 'deciding next action…');
 
       const actorPrompt = `You are the Executor. Goal: '${userGoal}'.
 Strategist's analysis:
@@ -563,7 +572,7 @@ Example:
       try {
         parsed = JSON.parse(cleanJson);
       } catch (e) {
-        appendAgentStatus(`Failed to parse actor JSON. Retrying…`, 'error');
+        updateThinkingText(thinkingBubble, 'retrying…');
         consecutiveErrors++;
         if (consecutiveErrors >= 3) break;
         continue;
@@ -572,30 +581,35 @@ Example:
       consecutiveErrors = 0;
       const actionStr = parsed.action || '';
 
-      if (actionStr.match(/^DONE\((.+)\)$/i)) {
+      // DONE action
+      const doneMatch = actionStr.match(/^DONE\((.+)\)$/i);
+      if (doneMatch) {
         isDone = true;
-        appendAgentStatus(`✅ Done`, 'success');
+        finalMessage = `### ✅ Done!\n${doneMatch[1]}`;
         break;
       }
 
+      // CLICK action
       const clickMatch = actionStr.match(/^CLICK\((\d+)\)$/i);
       if (clickMatch) {
-        appendAgentStatus(`🖱️ Clicking element #${clickMatch[1]}…`, 'action');
+        updateThinkingText(thinkingBubble, `clicking element #${clickMatch[1]}…`);
         await sendToContentScript({ action: 'executeAction', actionType: 'CLICK', id: parseInt(clickMatch[1]) });
         await new Promise(r => setTimeout(r, 2500));
         continue;
       }
 
+      // TYPE action
       const typeMatch = actionStr.match(/^TYPE\((\d+),\s*'(.+?)'\)$/i) || actionStr.match(/^TYPE\((\d+),\s*"(.+?)"\)$/i);
       if (typeMatch) {
-        appendAgentStatus(`⌨️ Typing "${typeMatch[2]}" into #${typeMatch[1]}…`, 'action');
+        updateThinkingText(thinkingBubble, `typing "${typeMatch[2]}"…`);
         await sendToContentScript({ action: 'executeAction', actionType: 'TYPE', id: parseInt(typeMatch[1]), textValue: typeMatch[2] });
         await new Promise(r => setTimeout(r, 2500));
         continue;
       }
 
+      // SCROLL action
       if (actionStr.includes('SCROLL_DOWN')) {
-        appendAgentStatus('📜 Scrolling down…', 'action');
+        updateThinkingText(thinkingBubble, 'scrolling down…');
         await chrome.scripting.executeScript({
           target: { tabId: (await chrome.tabs.query({ active: true, currentWindow: true }))[0].id },
           func: () => window.scrollBy(0, window.innerHeight * 0.7)
@@ -604,44 +618,59 @@ Example:
         continue;
       }
 
-      appendAgentStatus(`Unknown action: "${actionStr}"`, 'error');
+      // Unknown action — silent retry
+      updateThinkingText(thinkingBubble, 'retrying…');
       consecutiveErrors++;
       if (consecutiveErrors >= 3) break;
 
     } catch (err) {
-      appendAgentStatus(`Error: ${err.message}`, 'error');
+      console.error('Agent step error:', err);
+      updateThinkingText(thinkingBubble, 'recovering…');
       consecutiveErrors++;
       if (consecutiveErrors >= 3) break;
       await new Promise(r => setTimeout(r, 1000));
     }
   }
 
-  // --- CLEANUP UI ---
+  // ── GRACEFUL EXIT ──────────────────────────────────────
+  // Clean up markers on the page
+  try { await sendToContentScript({ action: 'removeMarkers' }); } catch (e) { }
+
+  // Fade out the thinking bubble
+  await dismissThinkingBubble(thinkingBubble);
+
+  // Stream the final answer beautifully
   if (cancelAgent) {
-    appendAgentStatus('Agent manually aborted by user.', 'error');
-    try { await sendToContentScript({ action: 'removeMarkers' }); } catch (e) {}
-  } else if (!isDone) {
-    appendAgentStatus(`Agent stopped (Reached ${MAX_STEPS} steps or errored out).`, 'error');
+    appendFinalAnswer('Agent stopped. Let me know if you\'d like to try again.');
+  } else if (isDone) {
+    appendFinalAnswer(finalMessage || '### ✅ Task completed!');
+  } else {
+    appendFinalAnswer(`I couldn't finish within **${MAX_STEPS} steps**. Want me to try again with a different approach?`);
   }
 
+  // Reset agent state
   isAgentRunning = false;
   cancelAgent = false;
   agentModeButton.innerHTML = agentIconNormal;
 }
+
+
+// ═══════════════════════════════════════════════════════════
+//  Shared: Streaming text renderer with Markdown support
+// ═══════════════════════════════════════════════════════════
 
 function streamText(fullText, container) {
   let i = 0;
   let currentText = "";
   const interval = setInterval(() => {
     currentText += fullText.charAt(i);
-    
-    // This turns the markdown into beautiful HTML with colors and bolding
+
     if (typeof marked !== 'undefined') {
       container.innerHTML = marked.parse(currentText);
     } else {
       container.textContent = currentText;
     }
-    
+
     i++;
     scrollToBottom();
     if (i >= fullText.length) clearInterval(interval);
