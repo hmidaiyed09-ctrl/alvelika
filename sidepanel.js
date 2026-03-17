@@ -14,6 +14,7 @@ let conversationHistory = [];
 let agentModeActive = false;
 let isAgentRunning = false;
 let cancelAgent = false;
+let activeAgentThinkingEl = null;
 
 // SVG Icons for the Agent Button
 const agentIconNormal = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a4 4 0 0 1 4 4v2a4 4 0 0 1-8 0V6a4 4 0 0 1 4-4z"/><path d="M18 14c2 1 3 3 3 5v2H3v-2c0-2 1-4 3-5"/><circle cx="12" cy="6" r="1"/></svg>`;
@@ -23,8 +24,12 @@ const agentIconStop = `<svg width="18" height="18" viewBox="0 0 24 24" fill="cur
 agentModeButton.addEventListener('click', () => {
   if (isAgentRunning) {
     cancelAgent = true;
+    if (activeAgentThinkingEl) {
+      updateThinkingState(activeAgentThinkingEl, 'Stopping…');
+    }
     return;
   }
+
   agentModeActive = !agentModeActive;
   agentModeButton.classList.toggle('active', agentModeActive);
   chatInput.placeholder = agentModeActive ? 'Agent mode — give me a task…' : 'Ask anything…';
@@ -171,18 +176,24 @@ async function handleSend() {
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
+    // Check if it's a restricted Chrome page
     if (tab && tab.id && tab.url && (tab.url.startsWith('chrome://') || tab.url.startsWith('edge://') || tab.url.startsWith('about:'))) {
       pageContext = "The user is on a restricted browser page (like a New Tab). You cannot see this page.";
-    } else if (tab && tab.id) {
+    }
+    // If it's a normal website, aggressively scrape it
+    else if (tab && tab.id) {
       const injectionResults = await chrome.scripting.executeScript({
         target: { tabId: tab.id },
         func: () => {
           let text = '';
           const article = document.querySelector('article');
           const main = document.querySelector('main') || document.querySelector('[role="main"]');
+
+          // Smart Cascading Fallback
           if (article) { text = article.innerText; }
           else if (main) { text = main.innerText; }
           else { text = document.body.innerText; }
+
           return {
             title: document.title,
             text: text.substring(0, 15000)
@@ -210,7 +221,7 @@ async function handleSend() {
   }
 
   // Show thinking
-  const thinkingEl = createThinkingBubble();
+  const thinkingEl = createThinkingState();
   chatContainer.appendChild(thinkingEl);
   scrollToBottom();
 
@@ -238,11 +249,75 @@ function appendUserMessage(text, imageUrl) {
   scrollToBottom();
 }
 
-function createThinkingBubble(initialText = 'thinking…') {
+function createThinkingState(initialText = 'thinking…') {
   const el = document.createElement('div');
   el.className = 'message ai thinking-state';
   el.textContent = initialText;
   return el;
+}
+
+function updateThinkingState(el, text) {
+  if (!el) return;
+
+  const cleanText = (text || 'thinking…')
+    .replace(/<[^>]+>/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  el.textContent = cleanText || 'thinking…';
+  scrollToBottom();
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fadeOutAndRemove(el, duration = 400) {
+  if (!el || !el.isConnected) return;
+  el.classList.add('fading-out');
+  await delay(duration);
+  if (el.isConnected) el.remove();
+}
+
+function extractTag(text, tagName) {
+  const match = text.match(new RegExp(`<${tagName}>([\\s\\S]*?)<\\/${tagName}>`, 'i'));
+  return match ? match[1].trim() : '';
+}
+
+function appendAIMessage(text, { stream = false, className = 'message ai stream-text' } = {}) {
+  const div = document.createElement('div');
+  div.className = className;
+  chatContainer.appendChild(div);
+  scrollToBottom();
+
+  if (stream) {
+    streamText(text, div);
+  } else if (typeof marked !== 'undefined') {
+    div.innerHTML = marked.parse(text);
+  } else {
+    div.textContent = text;
+  }
+
+  return div;
+}
+
+async function generateAgentFinalAnswer(apiConfig, userGoal, strategistText) {
+  try {
+    return await callLLM(apiConfig, [
+      {
+        role: 'system',
+        content: `You are writing the final user-facing response after an autonomous browser task is complete.
+Write a concise, polished Markdown answer.
+Do not mention hidden steps, internal tools, or agent phases.`
+      },
+      {
+        role: 'user',
+        content: `User goal: ${userGoal}\n\nCompletion summary:\n${strategistText}`
+      }
+    ]);
+  } catch {
+    return `### Done\nI finished the task: **${userGoal}**.`;
+  }
 }
 
 // ─── Shared: Build API config from saved settings ────────
@@ -309,15 +384,22 @@ async function processLLMResponse(userMessage, contextData, thinkingEl, imageUrl
     return;
   }
 
+  // Prepare user content (text and potentially image)
   const userContent = [];
   if (userMessage) {
     userContent.push({ type: 'text', text: userMessage });
   }
   if (imageUrl) {
-    userContent.push({ type: 'image_url', image_url: { url: imageUrl } });
+    userContent.push({
+      type: 'image_url',
+      image_url: { url: imageUrl }
+    });
   }
   if (screenshotUrl) {
-    userContent.push({ type: 'image_url', image_url: { url: screenshotUrl, detail: 'low' } });
+    userContent.push({
+      type: 'image_url',
+      image_url: { url: screenshotUrl, detail: 'low' }
+    });
   }
 
   const systemPrompt = `You are Alvelika, a sophisticated and proactive AI research assistant. 
@@ -340,6 +422,7 @@ Example:
 <answer>### Hello! 
 I see you're watching a fascinating video about **Fuel** by *Al-Dahih*. How can I help you explore this topic today?</answer>`;
 
+  // Push user message into conversation history
   conversationHistory.push({ role: 'user', content: userContent });
 
   const messages = [
@@ -365,12 +448,10 @@ I see you're watching a fascinating video about **Fuel** by *Al-Dahih*. How can 
       finalAnswer = rawResult.replace(/<thought>[\s\S]*?<\/thought>/gi, '').replace(/<\/?answer>/gi, '').trim();
     }
 
-    thinkingEl.textContent = thinkingText;
+    updateThinkingState(thinkingEl, thinkingText);
 
-    await new Promise((r) => setTimeout(r, 800));
-    thinkingEl.classList.add('fading-out');
-    await new Promise((r) => setTimeout(r, 500));
-    thinkingEl.remove();
+    await delay(800);
+    await fadeOutAndRemove(thinkingEl, 500);
 
     const answerDiv = document.createElement('div');
     answerDiv.className = 'message ai stream-text';
@@ -386,9 +467,8 @@ I see you're watching a fascinating video about **Fuel** by *Al-Dahih*. How can 
   }
 }
 
-
 // ═══════════════════════════════════════════════════════════
-//  AGENT MODE — Clean Single-Bubble Autonomous Agent
+//  AGENT MODE — Autonomous Web Agent Loop
 // ═══════════════════════════════════════════════════════════
 
 // Helper: ensure content script is injected, then send message
@@ -408,105 +488,89 @@ async function sendToContentScript(message) {
   }
 }
 
-// Smoothly update the thinking bubble text with a tiny fade effect
-function updateThinkingText(bubble, newText) {
-  bubble.style.transition = 'opacity 0.15s ease';
-  bubble.style.opacity = '0.4';
-  setTimeout(() => {
-    bubble.textContent = newText;
-    bubble.style.opacity = '1';
-    scrollToBottom();
-  }, 150);
-}
-
-// Gracefully dismiss the thinking bubble
-async function dismissThinkingBubble(bubble) {
-  bubble.classList.add('fading-out');
-  await new Promise(r => setTimeout(r, 500));
-  if (bubble.parentNode) bubble.remove();
-}
-
-// Stream the final answer into the chat
-function appendFinalAnswer(text) {
-  const answerDiv = document.createElement('div');
-  answerDiv.className = 'message ai stream-text';
-  chatContainer.appendChild(answerDiv);
-  streamText(text, answerDiv);
-}
-
 async function startAgentLoop(userGoal) {
   const apiConfig = await getApiConfig();
   if (!apiConfig) {
-    const errDiv = document.createElement('div');
-    errDiv.className = 'message ai';
-    errDiv.textContent = '⚙️ Please configure your AI provider in Settings first.';
-    chatContainer.appendChild(errDiv);
-    scrollToBottom();
+    appendAIMessage('Error: Configure your AI provider in Settings first.', {
+      className: 'message ai'
+    });
     return;
   }
 
-  // ── UI STARTUP ─────────────────────────────────────────
   isAgentRunning = true;
   cancelAgent = false;
   agentModeButton.innerHTML = agentIconStop;
 
-  // ONE single thinking bubble — the only visible element
-  const thinkingBubble = createThinkingBubble('thinking…');
-  chatContainer.appendChild(thinkingBubble);
+  const thinkingEl = createThinkingState('thinking…');
+  activeAgentThinkingEl = thinkingEl;
+  chatContainer.appendChild(thinkingEl);
   scrollToBottom();
 
   let isDone = false;
   let stepCount = 0;
   const MAX_STEPS = 15;
   let consecutiveErrors = 0;
-  let finalMessage = '';
+  let finalAnswer = '';
+  let lastVisibleThought = 'Reviewing the page…';
 
-  while (!isDone && stepCount < MAX_STEPS && !cancelAgent) {
-    stepCount++;
-
-    try {
-      // ── PHASE A: Observe ──────────────────────────────
-      if (cancelAgent) break;
-      updateThinkingText(thinkingBubble, 'scanning the page…');
+  try {
+    while (!isDone && stepCount < MAX_STEPS && !cancelAgent) {
+      stepCount++;
 
       let elementMap = [];
-      const drawResult = await sendToContentScript({ action: 'drawMarkers' });
-      elementMap = drawResult?.elementMap || [];
-
-      await new Promise(r => setTimeout(r, 400));
-      if (cancelAgent) break;
-
       let screenshot = null;
+
       try {
-        const res = await chrome.runtime.sendMessage({ action: 'captureScreen' });
-        if (res?.screenshot) screenshot = res.screenshot;
-      } catch (e) {
-        console.log('Screenshot failed:', e);
+        const drawResult = await sendToContentScript({ action: 'drawMarkers' });
+        elementMap = drawResult?.elementMap || [];
+
+        await delay(250);
+        if (cancelAgent) break;
+
+        try {
+          const res = await chrome.runtime.sendMessage({ action: 'captureScreen' });
+          if (res?.screenshot) screenshot = res.screenshot;
+        } catch (e) {
+          console.log('Screenshot failed:', e);
+        }
+      } finally {
+        try { await sendToContentScript({ action: 'removeMarkers' }); } catch (e) { }
       }
 
-      try { await sendToContentScript({ action: 'removeMarkers' }); } catch (e) { }
       if (cancelAgent) break;
 
-      // ── PHASE B: Strategist ───────────────────────────
-      updateThinkingText(thinkingBubble, 'analyzing what I see…');
+      // Strategist only: this is the only visible thinking text
+      const strategistPrompt = `You are the Strategist for an autonomous web agent.
+The user's goal is: "${userGoal}"
 
-      const strategistPrompt = `You are the Strategist for an Autonomous Web Agent. The user's goal is: '${userGoal}'.
-Look at the provided screenshot. Notice the numbered yellow badges on interactive elements.
-Answer these questions:
-1. What is the current state of the screen?
-2. Has the user's goal been reached?
-3. What is the exact next step?
+You will receive:
+- a screenshot of the current page with numbered markers on interactive elements
+- an element map in JSON
 
-CRITICAL INSTRUCTION: You MUST end your analysis with exactly ONE of these tags:
-<status>DONE</status> (Use this ONLY if the user's goal is completely achieved)
-<status>CONTINUE</status> (Use this if we still need to click/type to reach the goal)
+Your job is to decide whether the goal is already complete, and if not, what the next move should be.
 
-When DONE, also include a <summary> tag with a clean, user-friendly summary of what was accomplished. Use Markdown.
-Example: <summary>### Done! \\nI searched for **cats** on Google and found the top results for you.</summary>`;
+IMPORTANT FORMAT RULES:
+1. Reply with exactly these tags: <thinking>, <status>, <final>.
+2. Inside <thinking>, write 1–2 short, polished sentences. This text is shown directly to the user inside a single "thinking..." bubble.
+3. Do NOT mention JSON, element ids, executors, hidden steps, tools, or internal phases.
+4. Use <status>DONE</status> only if the user's goal is fully achieved.
+5. Use <status>CONTINUE</status> if another page action is still needed.
+6. If status is DONE, write the final user-facing Markdown response inside <final>. If not done, leave <final></final> empty.
 
-      const strategistContent = [{ type: 'text', text: `Element Map: ${JSON.stringify(elementMap)}` }];
+Return exactly this structure:
+<thinking>...</thinking>
+<status>CONTINUE or DONE</status>
+<final>...</final>`;
+
+      const strategistContent = [
+        { type: 'text', text: `Element Map: ${JSON.stringify(elementMap)}` }
+      ];
+
       if (screenshot) {
-        strategistContent.push({ type: 'image_url', image_url: { url: screenshot, detail: 'low' } });
+        strategistContent.push({
+          type: 'image_url',
+          image_url: { url: screenshot, detail: 'low' }
+        });
       }
 
       const strategyText = await callLLM(apiConfig, [
@@ -514,165 +578,212 @@ Example: <summary>### Done! \\nI searched for **cats** on Google and found the t
         { role: 'user', content: strategistContent }
       ]);
 
-      // Update the bubble with what the strategist is actually thinking
-      const cleanStrategy = strategyText
-        .replace(/<status>[\s\S]*?<\/status>/gi, '')
-        .replace(/<summary>[\s\S]*?<\/summary>/gi, '')
-        .trim();
-      // Show only the first meaningful sentence so it stays compact
-      const firstLine = cleanStrategy.split(/\n/)[0].substring(0, 120);
-      updateThinkingText(thinkingBubble, firstLine || 'analyzing…');
+      const strategistThinking =
+        extractTag(strategyText, 'thinking') ||
+        'Reviewing the page and deciding the best next move…';
 
-      // ── Check if DONE ─────────────────────────────────
-      if (/<status>\s*DONE\s*<\/status>/i.test(strategyText) || strategyText.includes('GOAL_REACHED')) {
+      lastVisibleThought = strategistThinking;
+      updateThinkingState(thinkingEl, strategistThinking);
+
+      const status =
+        (extractTag(strategyText, 'status') ||
+          (/<status>\s*DONE\s*<\/status>/i.test(strategyText) ? 'DONE' : 'CONTINUE'))
+          .trim()
+          .toUpperCase();
+
+      if (status === 'DONE') {
         isDone = true;
-        // Extract the pretty summary if provided
-        const summaryMatch = strategyText.match(/<summary>([\s\S]*?)<\/summary>/i);
-        if (summaryMatch) {
-          finalMessage = summaryMatch[1].trim();
-        } else {
-          finalMessage = `### ✅ Done!\n${cleanStrategy}`;
+        finalAnswer = extractTag(strategyText, 'final');
+
+        if (!finalAnswer) {
+          finalAnswer = await generateAgentFinalAnswer(apiConfig, userGoal, strategyText);
         }
+
         break;
       }
 
       if (cancelAgent) break;
 
-      // ── PHASE C: Actor ────────────────────────────────
-      updateThinkingText(thinkingBubble, 'deciding next action…');
+      // Actor remains fully hidden from the UI
+      const actorPrompt = `You are the Executor for an autonomous web agent.
+User goal: "${userGoal}"
 
-      const actorPrompt = `You are the Executor. Goal: '${userGoal}'.
-Strategist's analysis:
-<strategy>${strategyText}</strategy>
+Strategist analysis:
+${strategyText}
 
-Map of interactive elements: ${JSON.stringify(elementMap)}.
+Interactive element map:
+${JSON.stringify(elementMap)}
 
-Based on the strategy, output ONLY a raw JSON object (no markdown) with these keys:
-- "thinking": your reasoning
-- "action": ONE of CLICK(id), TYPE(id, 'text'), SCROLL_DOWN, or DONE(message)
+Return ONLY one raw JSON object. No markdown. No explanation outside JSON.
 
-Example:
-{"thinking":"I need to search. Search box is #3.","action":"TYPE(3, 'cats')"}
-{"thinking":"The task is done.","action":"DONE(Finished)"}`;
+Schema:
+{
+  "thinking": "brief private reasoning",
+  "action": "CLICK(id) | TYPE(id, 'text') | SCROLL_DOWN"
+}
+
+Rules:
+- Choose exactly one next action.
+- Do NOT return DONE unless absolutely unavoidable.
+- Only use an id that exists in the element map.`;
 
       const actorRaw = await callLLM(apiConfig, [
         { role: 'system', content: actorPrompt },
-        { role: 'user', content: 'Execute next action.' }
+        { role: 'user', content: 'Choose the next action.' }
       ]);
 
-      if (cancelAgent) break;
-
-      // ── PHASE D: Parse & Execute ──────────────────────
       let cleanJson = actorRaw.replace(/```json/gi, '').replace(/```/g, '').trim();
       const firstBrace = cleanJson.indexOf('{');
       const lastBrace = cleanJson.lastIndexOf('}');
-      if (firstBrace !== -1 && lastBrace !== -1) cleanJson = cleanJson.substring(firstBrace, lastBrace + 1);
+
+      if (firstBrace !== -1 && lastBrace !== -1) {
+        cleanJson = cleanJson.substring(firstBrace, lastBrace + 1);
+      }
 
       let parsed;
       try {
         parsed = JSON.parse(cleanJson);
       } catch (e) {
-        updateThinkingText(thinkingBubble, 'retrying…');
         consecutiveErrors++;
+        updateThinkingState(thinkingEl, 'I’m re-checking the page to choose the right next move…');
+
         if (consecutiveErrors >= 3) break;
+        await delay(900);
         continue;
       }
 
       consecutiveErrors = 0;
       const actionStr = parsed.action || '';
 
-      // DONE action
-      const doneMatch = actionStr.match(/^DONE\((.+)\)$/i);
+      const doneMatch = actionStr.match(/^DONE\(([\s\S]*)\)$/i);
       if (doneMatch) {
         isDone = true;
-        finalMessage = `### ✅ Done!\n${doneMatch[1]}`;
+        finalAnswer = doneMatch[1]?.trim();
+
+        if (!finalAnswer) {
+          finalAnswer = await generateAgentFinalAnswer(apiConfig, userGoal, strategyText);
+        }
         break;
       }
 
-      // CLICK action
       const clickMatch = actionStr.match(/^CLICK\((\d+)\)$/i);
       if (clickMatch) {
-        updateThinkingText(thinkingBubble, `clicking element #${clickMatch[1]}…`);
-        await sendToContentScript({ action: 'executeAction', actionType: 'CLICK', id: parseInt(clickMatch[1]) });
-        await new Promise(r => setTimeout(r, 2500));
-        continue;
-      }
-
-      // TYPE action
-      const typeMatch = actionStr.match(/^TYPE\((\d+),\s*'(.+?)'\)$/i) || actionStr.match(/^TYPE\((\d+),\s*"(.+?)"\)$/i);
-      if (typeMatch) {
-        updateThinkingText(thinkingBubble, `typing "${typeMatch[2]}"…`);
-        await sendToContentScript({ action: 'executeAction', actionType: 'TYPE', id: parseInt(typeMatch[1]), textValue: typeMatch[2] });
-        await new Promise(r => setTimeout(r, 2500));
-        continue;
-      }
-
-      // SCROLL action
-      if (actionStr.includes('SCROLL_DOWN')) {
-        updateThinkingText(thinkingBubble, 'scrolling down…');
-        await chrome.scripting.executeScript({
-          target: { tabId: (await chrome.tabs.query({ active: true, currentWindow: true }))[0].id },
-          func: () => window.scrollBy(0, window.innerHeight * 0.7)
+        await sendToContentScript({
+          action: 'executeAction',
+          actionType: 'CLICK',
+          id: parseInt(clickMatch[1], 10)
         });
-        await new Promise(r => setTimeout(r, 1500));
+        await delay(2200);
         continue;
       }
 
-      // Unknown action — silent retry
-      updateThinkingText(thinkingBubble, 'retrying…');
-      consecutiveErrors++;
-      if (consecutiveErrors >= 3) break;
+      const typeMatch =
+        actionStr.match(/^TYPE\((\d+),\s*'([\s\S]*?)'\)$/i) ||
+        actionStr.match(/^TYPE\((\d+),\s*"([\s\S]*?)"\)$/i);
 
-    } catch (err) {
-      console.error('Agent step error:', err);
-      updateThinkingText(thinkingBubble, 'recovering…');
+      if (typeMatch) {
+        await sendToContentScript({
+          action: 'executeAction',
+          actionType: 'TYPE',
+          id: parseInt(typeMatch[1], 10),
+          textValue: typeMatch[2]
+        });
+        await delay(2200);
+        continue;
+      }
+
+      if (/SCROLL_DOWN/i.test(actionStr)) {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (tab?.id) {
+          await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            func: () => window.scrollBy(0, window.innerHeight * 0.7)
+          });
+        }
+        await delay(1500);
+        continue;
+      }
+
       consecutiveErrors++;
+      updateThinkingState(thinkingEl, 'I’m adjusting my plan and trying another route…');
+
       if (consecutiveErrors >= 3) break;
-      await new Promise(r => setTimeout(r, 1000));
+      await delay(800);
     }
+
+    if (cancelAgent) {
+      updateThinkingState(thinkingEl, 'Stopping…');
+      await delay(200);
+      await fadeOutAndRemove(thinkingEl);
+      appendAIMessage('Stopped.', { className: 'message ai' });
+      return;
+    }
+
+    if (isDone) {
+      await delay(350);
+      await fadeOutAndRemove(thinkingEl);
+
+      const finalText = finalAnswer?.trim() || `### Done\nI finished: **${userGoal}**.`;
+      appendAIMessage(finalText, { stream: true });
+      return;
+    }
+
+    updateThinkingState(thinkingEl, lastVisibleThought || 'I couldn’t finish that task from here…');
+    await delay(250);
+    await fadeOutAndRemove(thinkingEl);
+
+    appendAIMessage(
+      `I couldn’t finish that task from the current page. Try guiding me to the right section or rephrasing the goal.`,
+      { stream: true }
+    );
+  } catch (err) {
+    console.error('Agent loop failed:', err);
+
+    if (thinkingEl?.isConnected) {
+      updateThinkingState(thinkingEl, 'I hit a snag while working on that…');
+      await delay(250);
+      await fadeOutAndRemove(thinkingEl);
+    }
+
+    appendAIMessage(`I ran into an error: ${err.message}`, {
+      className: 'message ai'
+    });
+  } finally {
+    activeAgentThinkingEl = null;
+    try { await sendToContentScript({ action: 'removeMarkers' }); } catch (e) { }
+    isAgentRunning = false;
+    cancelAgent = false;
+    agentModeButton.innerHTML = agentIconNormal;
   }
-
-  // ── GRACEFUL EXIT ──────────────────────────────────────
-  // Clean up markers on the page
-  try { await sendToContentScript({ action: 'removeMarkers' }); } catch (e) { }
-
-  // Fade out the thinking bubble
-  await dismissThinkingBubble(thinkingBubble);
-
-  // Stream the final answer beautifully
-  if (cancelAgent) {
-    appendFinalAnswer('Agent stopped. Let me know if you\'d like to try again.');
-  } else if (isDone) {
-    appendFinalAnswer(finalMessage || '### ✅ Task completed!');
-  } else {
-    appendFinalAnswer(`I couldn't finish within **${MAX_STEPS} steps**. Want me to try again with a different approach?`);
-  }
-
-  // Reset agent state
-  isAgentRunning = false;
-  cancelAgent = false;
-  agentModeButton.innerHTML = agentIconNormal;
 }
 
-
-// ═══════════════════════════════════════════════════════════
-//  Shared: Streaming text renderer with Markdown support
-// ═══════════════════════════════════════════════════════════
-
 function streamText(fullText, container) {
-  let i = 0;
-  let currentText = "";
-  const interval = setInterval(() => {
-    currentText += fullText.charAt(i);
-
-    if (typeof marked !== 'undefined') {
-      container.innerHTML = marked.parse(currentText);
-    } else {
-      container.textContent = currentText;
+  return new Promise((resolve) => {
+    if (!fullText) {
+      container.textContent = '';
+      resolve();
+      return;
     }
 
-    i++;
-    scrollToBottom();
-    if (i >= fullText.length) clearInterval(interval);
-  }, 10);
+    let i = 0;
+    let currentText = '';
+
+    const interval = setInterval(() => {
+      currentText += fullText.charAt(i);
+
+      if (typeof marked !== 'undefined') {
+        container.innerHTML = marked.parse(currentText);
+      } else {
+        container.textContent = currentText;
+      }
+
+      i++;
+      scrollToBottom();
+
+      if (i >= fullText.length) {
+        clearInterval(interval);
+        resolve();
+      }
+    }, 10);
+  });
 }
