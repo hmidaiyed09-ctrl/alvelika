@@ -534,73 +534,263 @@ CRITICAL INSTRUCTIONS:
 //  AGENT MODE — Autonomous JSON Agent
 // ═══════════════════════════════════════════════════════════
 
+// ─── Page Scraper — extracts interactive elements + page text ───
+async function scrapePageForAgent() {
+  const result = { pageTitle: '', pageUrl: '', pageText: '', elements: '', screenshot: null };
+
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab || !tab.id) return result;
+
+    if (tab.url && (tab.url.startsWith('chrome://') || tab.url.startsWith('edge://') || tab.url.startsWith('about:'))) {
+      result.pageTitle = tab.title || '';
+      result.pageUrl = tab.url;
+      result.pageText = 'Restricted browser page. No content available.';
+      return result;
+    }
+
+    const injectionResults = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => {
+        // ── Selector Generator ──
+        function getSelector(el, index) {
+          const tag = el.tagName.toLowerCase();
+
+          // For links, always use href contains-match (most reliable)
+          if (tag === 'a' && el.getAttribute('href')) {
+            let rawHref = el.getAttribute('href');
+            rawHref = rawHref.split('&pp=')[0].split('&feature=')[0].split('&si=')[0].split('&list=')[0];
+            if (rawHref.length > 70) rawHref = rawHref.substring(0, 70);
+            const sel = `a[href*="${rawHref}"]`;
+            if (document.querySelectorAll(sel).length === 1) return sel;
+            // Not unique — use nth-of-type among matching hrefs
+            const all = Array.from(document.querySelectorAll(sel));
+            const nthIndex = all.indexOf(el) + 1;
+            return `a[href*="${rawHref}"]:nth-of-type(${nthIndex})`;
+          }
+
+          // Unique ID
+          if (el.id && document.querySelectorAll(`#${CSS.escape(el.id)}`).length === 1) {
+            return `#${CSS.escape(el.id)}`;
+          }
+
+          // Non-unique ID — use nth match
+          if (el.id) {
+            const all = Array.from(document.querySelectorAll(`[id="${el.id}"]`));
+            const nthIndex = all.indexOf(el) + 1;
+            if (nthIndex === 1) return `#${CSS.escape(el.id)}`;
+            return `[id="${el.id}"]:nth-of-type(${nthIndex})`;
+          }
+
+          if (el.name) return `${tag}[name="${el.name}"]`;
+          if (el.getAttribute('aria-label')) {
+            const sel = `${tag}[aria-label="${el.getAttribute('aria-label')}"]`;
+            if (document.querySelectorAll(sel).length === 1) return sel;
+          }
+          if (el.placeholder) return `${tag}[placeholder="${el.placeholder}"]`;
+          if (el.title) return `${tag}[title="${el.title}"]`;
+
+          if (el.className && typeof el.className === 'string' && el.className.trim()) {
+            const classes = el.className.trim().split(/\s+/).slice(0, 3).map(c => `.${CSS.escape(c)}`).join('');
+            const sel = `${tag}${classes}`;
+            if (document.querySelectorAll(sel).length === 1) return sel;
+          }
+
+          const parent = el.parentElement;
+          if (parent) {
+            const siblings = Array.from(parent.children).filter(c => c.tagName === el.tagName);
+            if (siblings.length > 1) {
+              const idx = siblings.indexOf(el) + 1;
+              const parentSel = parent.id ? `#${CSS.escape(parent.id)}` : parent.tagName.toLowerCase();
+              return `${parentSel} > ${tag}:nth-of-type(${idx})`;
+            }
+          }
+          return `${tag}:nth-of-type(${index + 1})`;
+        }
+
+        // ── Collect & categorize ──
+        const inputs = [];
+        const buttons = [];
+        const links = [];
+
+        const interactiveQuery = 'input:not([type="hidden"]), textarea, select, button, [role="button"], a[href], [role="link"], [role="tab"], [contenteditable="true"]';
+        const allElements = document.querySelectorAll(interactiveQuery);
+        let globalIndex = 0;
+
+        allElements.forEach((el) => {
+          const rect = el.getBoundingClientRect();
+          if (rect.width === 0 && rect.height === 0) return;
+
+          const tag = el.tagName.toLowerCase();
+          const text = (el.textContent || '').trim().substring(0, 80);
+          const selector = getSelector(el, globalIndex);
+          globalIndex++;
+
+          let attrs = [];
+          if (el.id) attrs.push(`id="${el.id}"`);
+          if (el.name) attrs.push(`name="${el.name}"`);
+          if (el.type) attrs.push(`type="${el.type}"`);
+          if (el.placeholder) attrs.push(`placeholder="${el.placeholder}"`);
+          if (el.value) attrs.push(`value="${el.value.substring(0, 40)}"`);
+          if (tag === 'a' && el.getAttribute('href')) {
+            let rawHref = el.getAttribute('href');
+            rawHref = rawHref.split('&pp=')[0].split('&feature=')[0].split('&si=')[0];
+            if (rawHref.length > 80) rawHref = rawHref.substring(0, 80);
+            attrs.push(`href="${rawHref}"`);
+          }
+          if (el.getAttribute('aria-label')) attrs.push(`aria-label="${el.getAttribute('aria-label')}"`);
+          if (el.title) attrs.push(`title="${el.title}"`);
+
+          const line = `<${tag} ${attrs.join(' ')}> ${text ? `"${text}"` : '(no text)'}\n     ✅ SELECTOR: ${selector}`;
+
+          if (tag === 'input' || tag === 'textarea' || tag === 'select') {
+            inputs.push(line);
+          } else if (tag === 'button' || el.getAttribute('role') === 'button') {
+            if (buttons.length < 25) buttons.push(line);
+          } else if (tag === 'a') {
+            if (links.length < 40) links.push(line);
+          } else {
+            if (buttons.length < 25) buttons.push(line);
+          }
+        });
+
+        // ── Build categorized output ──
+        let output = '';
+        if (inputs.length > 0) {
+          output += '── INPUTS & FIELDS ──\n';
+          inputs.forEach((line, i) => { output += `[I${i + 1}] ${line}\n`; });
+        }
+        if (buttons.length > 0) {
+          output += '\n── BUTTONS ──\n';
+          buttons.forEach((line, i) => { output += `[B${i + 1}] ${line}\n`; });
+        }
+        if (links.length > 0) {
+          output += '\n── LINKS ──\n';
+          links.forEach((line, i) => { output += `[L${i + 1}] ${line}\n`; });
+        }
+
+        const mainContent = document.querySelector('main') || document.querySelector('article') || document.body;
+        const pageText = (mainContent.innerText || '').substring(0, 5000);
+
+        return {
+          title: document.title,
+          url: window.location.href,
+          pageText,
+          elements: output
+        };
+      }
+    });
+
+    if (injectionResults && injectionResults[0] && injectionResults[0].result) {
+      const r = injectionResults[0].result;
+      result.pageTitle = r.title;
+      result.pageUrl = r.url;
+      result.pageText = r.pageText;
+      result.elements = r.elements;
+    }
+  } catch (err) {
+    console.log('Could not scrape page:', err);
+  }
+
+  try {
+    const res = await chrome.runtime.sendMessage({ action: 'captureScreen' });
+    if (res && res.screenshot) result.screenshot = res.screenshot;
+  } catch (err) {
+    console.log('Could not capture screenshot:', err);
+  }
+
+  return result;
+}
+
+// Step 0 — Analyze the user's raw prompt and produce a clear goal
+function buildGoalAnalysisPrompt() {
+  return `You are Alvelika Agent. The user just gave you a task.
+You receive the DOM and screenshot of the current page.
+
+Your job is to ANALYZE the user's request and produce a clear, precise goal.
+
+YOUR RESPONSE MUST BE PURE JSON:
+
+{
+  "thinking": {
+    "what_user_said": "What did the user literally ask for?",
+    "what_user_wants": "What is the user truly trying to achieve? What information or outcome do they want?",
+    "key_details": "What specific details did the user mention that I must follow exactly? (e.g., specific website, specific query, specific action)"
+  },
+  "user_goal": "A clear, precise, step-by-step rewrite of the user's goal. Be specific. Include every constraint the user mentioned."
+}
+
+RULES:
+1. If the user mentioned a specific website (e.g., Google), that is a hard constraint — do NOT use a different website.
+2. Rewrite the goal so it cannot be misunderstood.
+3. Respond with PURE JSON only. No wrapping, no code fences, no extra text.`;
+}
+
 function buildAgentSystemPrompt(userGoal, previousValidateOption) {
   const historyBlock = previousValidateOption
     ? `\n\nPREVIOUS STEPS LOG:\n${previousValidateOption}`
     : '\n\nThis is the FIRST step. No previous commands have been executed.';
 
-  return `You are Alvelika Agent, an autonomous AI that can see and interact with web pages.
+  return `You are Alvelika Agent — an autonomous AI that ACTS on web pages. Your job is to COMPLETE the user's goal efficiently, not to explain or analyze endlessly.
 
-You receive 3 inputs every step:
-
-1. THE DOM (HTML): You use this to read the page structure, find text content, locate CSS selectors for buttons/inputs/links, and understand what options are available. This is your main tool for choosing selectors in your commands.
-
-2. THE SCREENSHOT: You use this to see what the user actually sees — especially buttons that have NO text and only a logo/icon. The DOM might show an empty <button> but the screenshot shows you it's a search icon or a menu icon. This is your eyes.
-
-3. THE USER GOAL: This is what the user wants to achieve. Every decision you make — every click, every navigation — must move closer to this goal. Never lose track of it.
+You receive these inputs every step:
+- SCREENSHOT: The source of truth. What you SEE is what exists. If the target is visible, act on it.
+- INTERACTIVE ELEMENTS: A categorized list of clickable/typeable elements with ready-to-use selectors (marked with ✅ SELECTOR). Use these selectors.
+- PAGE TEXT: The visible text content of the page.
 
 USER GOAL: "${userGoal}"
 ${historyBlock}
 
-YOUR RESPONSE MUST BE PURE JSON — nothing else. No markdown, no explanation, no text outside the JSON.
+═══ DECISION POLICY (follow strictly) ═══
 
-The JSON must contain exactly 3 objects:
+1. IF the target is clearly visible in the screenshot AND a matching selector exists in the elements list → CLICK IT NOW. Do not scroll, do not re-analyze.
+2. IF the target is visible but no perfect selector exists → use the CLOSEST matching selector. Prefer: parent container selectors, href-contains selectors, or aria-label selectors.
+3. IF there are ads/sponsored items → SKIP them. Click the first REAL result.
+4. NEVER scroll more than 2 times for the same sub-goal. After 2 scrolls, you MUST attempt a click with the best available selector.
+5. The "type" command auto-focuses the element. Do NOT click an input before typing — just use "type" directly.
+6. Act IMMEDIATELY when confidence is high and risk is low. Analysis is support, not the goal.
+
+═══ RESPONSE FORMAT (pure JSON, nothing else) ═══
 
 {
   "thinking": {
-    "q1_did_it_work": "(your answer)",
-    "q2_icon_buttons": "(your answer)",
-    "q3_page_relevance": "(your answer)",
-    "q4_two_options": "(your answer)"
+    "state": "Brief: what page am I on, did the last command work?",
+    "target": "Brief: what element do I need to interact with next?",
+    "action_reason": "Brief: why this action, and why not an alternative?"
   },
   "instruct": {
     "type": "navigate | click | type | scroll | wait | done",
-    "selector": "CSS selector of the target element (if applicable)",
-    "url": "URL to navigate to (only for navigate)",
-    "value": "text to type (only for type), or 'up'/'down' (only for scroll)",
-    "description": "short human-readable description of this action"
+    "selector": "CSS selector from the ✅ SELECTOR list",
+    "url": "URL (only for navigate)",
+    "value": "text to type (only for type), or up/down (only for scroll)",
+    "description": "short description of this action"
   },
-  "validateOption": "The full history of all steps so far INCLUDING this new step."
+  "validateOption": "Full history of all steps including this one. Mark each ✓ or ✗."
 }
 
-THINKING QUESTIONS — answer ALL 4 in order:
+═══ SELECTOR RULES ═══
 
-q1_did_it_work: "Did the latest command work? Let me see what it told me and how to know that it worked."
+- COPY selectors exactly from the ✅ SELECTOR lines in the elements list.
+- If the exact element isn't listed, use a RELATIVE selector strategy:
+  Example: the first video result on YouTube → use the first thumbnail link or title link from the LINKS section.
+- For links, prefer href-contains selectors: a[href*="/watch?v=..."]
+- NEVER invent selectors from memory. The elements list is the truth.
 
-q2_icon_buttons: "Is there a button that doesn't have text and only has a logo, and from that logo what could it mean and what does it do on this page?"
+═══ COMMANDS ═══
 
-q3_page_relevance: "Why is this page correct and how does it help us reach the goal?"
-
-q4_two_options: "What are the first 2 options that come to my mind to reach the goal and why? Which one do I choose?"
-
-INSTRUCT RULES:
-- One action per step. Pick the single best next step.
 - "navigate": Go to a URL. Requires "url".
 - "click": Click an element. Requires "selector".
-- "type": Type text into an input/textarea. Requires "selector" and "value".
-- "scroll": Scroll the page. Requires "value": "down" or "up".
-- "wait": Wait for page to update.
-- "done": The goal is complete. Put the final answer in "description".
+- "type": Type into input/textarea. Requires "selector" and "value".
+- "scroll": Scroll page. Requires "value": "down" or "up".
+- "wait": Wait for page update (use sparingly).
+- "done": Goal complete. Put final answer in "description".
 
-VALIDATE OPTION RULES:
-- Carry forward ALL previous steps and append the current one.
-- Each step: explain WHAT you did and WHY.
-- Mark completed steps with ✓ or ✗.
+═══ CRITICAL ═══
 
-CRITICAL RULES:
-1. You can ONLY see the current page. You CANNOT browse other sites or search the web.
-2. Respond with PURE JSON only. No wrapping, no code fences, no extra text.
-3. When the goal is fully achieved, set instruct.type to "done".`;
+- Your primary job is to COMPLETE the goal, not to maximize explanation.
+- Keep "thinking" SHORT (1-2 sentences each). Long analysis = wasted time.
+- If the target is visible and the action is obvious, just do it.
+- Respond with PURE JSON only. No markdown, no code fences, no extra text.`;
 }
 
 // ─── Command Executor — takes instruct JSON, executes on page ───
@@ -646,13 +836,35 @@ async function executeAgentCommand(instruct) {
     }
   }
 
-  // CLICK — click an element by CSS selector
+  // CLICK — click an element by CSS selector (with href fallback)
   if (type === 'click') {
     try {
       const results = await chrome.scripting.executeScript({
         target: { tabId: tab.id },
         func: (selector) => {
-          const el = document.querySelector(selector);
+          let el = document.querySelector(selector);
+
+          // Fallback 1: if selector has exact href=, try contains match
+          if (!el && selector.includes('href="') && !selector.includes('href*=')) {
+            const hrefMatch = selector.match(/href="([^"]+)"/);
+            if (hrefMatch) {
+              const href = hrefMatch[1].split('&pp=')[0].split('&feature=')[0].split('&si=')[0];
+              el = document.querySelector(`a[href*="${href}"]`);
+            }
+          }
+
+          // Fallback 2: if selector has href*=, try shorter match
+          if (!el && selector.includes('href*=')) {
+            const hrefMatch = selector.match(/href\*="([^"]+)"/);
+            if (hrefMatch) {
+              const parts = hrefMatch[1].split('?');
+              if (parts.length > 1) {
+                const pathAndKey = parts[0] + '?' + parts[1].split('&')[0];
+                el = document.querySelector(`a[href*="${pathAndKey}"]`);
+              }
+            }
+          }
+
           if (!el) return { success: false, error: `Element not found: ${selector}` };
           el.click();
           return { success: true, description: `Clicked: ${selector}` };
@@ -739,6 +951,54 @@ async function handleAgentSend(userGoal) {
 
   agentRunning = true;
   showAgentRunningUI();
+
+  // ═══ STEP 0 — Analyze the user's raw prompt ═══
+  const goalThinkingEl = createThinkingState('Understanding your goal…');
+  chatContainer.appendChild(goalThinkingEl);
+  scrollToBottom();
+
+  let refinedGoal = userGoal;
+  try {
+    const goalPage = await scrapePageForAgent();
+
+    const goalUserContent = [
+      { type: 'text', text: `User's raw request: "${userGoal}"\n\nCurrent page title: ${goalPage.pageTitle}\nCurrent page URL: ${goalPage.pageUrl}\n\nPage text:\n${goalPage.pageText}` }
+    ];
+    if (goalPage.screenshot) {
+      goalUserContent.push({ type: 'image_url', image_url: { url: goalPage.screenshot, detail: 'low' } });
+    }
+
+    const goalRaw = await callLLM(apiConfig, [
+      { role: 'system', content: buildGoalAnalysisPrompt() },
+      { role: 'user', content: goalUserContent }
+    ]);
+
+    const goalCleaned = goalRaw.replace(/^```json?\s*/i, '').replace(/```\s*$/i, '').trim();
+    const goalParsed = JSON.parse(goalCleaned);
+
+    if (goalParsed.user_goal) {
+      refinedGoal = goalParsed.user_goal;
+    }
+
+    // Show Step 0 result
+    updateThinkingState(goalThinkingEl, 'Goal understood.');
+    await delay(400);
+    await fadeOutAndRemove(goalThinkingEl, 300);
+
+    const goalDiv = document.createElement('div');
+    goalDiv.className = 'message ai agent-command';
+    goalDiv.innerHTML = `<span class="agent-cmd-icon">🎯</span> <strong>Goal:</strong> ${refinedGoal}`;
+    chatContainer.appendChild(goalDiv);
+    scrollToBottom();
+
+  } catch (err) {
+    await fadeOutAndRemove(goalThinkingEl, 300);
+    console.log('Goal analysis failed, using raw prompt:', err);
+  }
+
+  if (!agentRunning) { hideAgentRunningUI(); return; }
+
+  // ═══ AGENT LOOP ═══
   let previousValidateOption = null;
   let stepCount = 0;
 
@@ -750,52 +1010,16 @@ async function handleAgentSend(userGoal) {
     chatContainer.appendChild(thinkingEl);
     scrollToBottom();
 
-    // ── 1. Scrape the DOM ──
-    let domContent = 'No DOM available.';
-    let pageUrl = '';
-    let pageTitle = '';
-    try {
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (tab && tab.id && tab.url && !tab.url.startsWith('chrome://') && !tab.url.startsWith('edge://') && !tab.url.startsWith('about:')) {
-        pageUrl = tab.url;
-        pageTitle = tab.title || '';
-        const injectionResults = await chrome.scripting.executeScript({
-          target: { tabId: tab.id },
-          func: () => ({
-            title: document.title,
-            url: window.location.href,
-            dom: document.documentElement.outerHTML.substring(0, 50000)
-          })
-        });
-        if (injectionResults && injectionResults[0] && injectionResults[0].result) {
-          const r = injectionResults[0].result;
-          pageTitle = r.title;
-          pageUrl = r.url;
-          domContent = r.dom;
-        }
-      } else {
-        domContent = 'The user is on a restricted browser page (like a New Tab). No DOM available.';
-      }
-    } catch (err) {
-      console.log('Could not scrape DOM:', err);
-    }
+    // ── 1. Scrape the page ──
+    const page = await scrapePageForAgent();
 
-    // ── 2. Capture screenshot ──
-    let screenshotUrl = null;
-    try {
-      const res = await chrome.runtime.sendMessage({ action: 'captureScreen' });
-      if (res && res.screenshot) screenshotUrl = res.screenshot;
-    } catch (err) {
-      console.log('Could not capture screenshot:', err);
-    }
-
-    // ── 3. Build messages ──
-    const systemPrompt = buildAgentSystemPrompt(userGoal, previousValidateOption);
+    // ── 2. Build messages ──
+    const systemPrompt = buildAgentSystemPrompt(refinedGoal, previousValidateOption);
     const userContent = [
-      { type: 'text', text: `Current page title: ${pageTitle}\nCurrent page URL: ${pageUrl}\n\nFull DOM:\n${domContent}` }
+      { type: 'text', text: `Current page title: ${page.pageTitle}\nCurrent page URL: ${page.pageUrl}\n\nINTERACTIVE ELEMENTS:\n${page.elements}\n\nPAGE TEXT:\n${page.pageText}` }
     ];
-    if (screenshotUrl) {
-      userContent.push({ type: 'image_url', image_url: { url: screenshotUrl, detail: 'low' } });
+    if (page.screenshot) {
+      userContent.push({ type: 'image_url', image_url: { url: page.screenshot, detail: 'low' } });
     }
 
     // ── 4. Call LLM ──
@@ -834,11 +1058,10 @@ async function handleAgentSend(userGoal) {
       const thinkingBody = document.createElement('div');
       thinkingBody.className = 'agent-thinking-body collapsed';
       const thinkingMd = [
-        `**Q1 — Did it work?**\n${thinking.q1_did_it_work}`,
-        `**Q2 — Icon buttons?**\n${thinking.q2_icon_buttons}`,
-        `**Q3 — Page relevance?**\n${thinking.q3_page_relevance}`,
-        `**Q4 — Two options?**\n${thinking.q4_two_options}`
-      ].join('\n\n---\n\n');
+        `**State:** ${thinking.state || '—'}`,
+        `**Target:** ${thinking.target || '—'}`,
+        `**Reason:** ${thinking.action_reason || '—'}`
+      ].join('\n\n');
 
       if (typeof marked !== 'undefined') {
         thinkingBody.innerHTML = marked.parse(thinkingMd);
