@@ -788,13 +788,22 @@ ${historyBlock}
 5. The "type" command auto-focuses the element. Do NOT click an input before typing — just use "type" directly.
 6. Act IMMEDIATELY when confidence is high and risk is low. Analysis is support, not the goal.
 
+═══ FIRST QUESTION (answer BEFORE deciding any action) ═══
+
+Before choosing an action, you MUST answer:
+  "goal_check": Is the user's goal ALREADY achieved right now based on the current page URL, title, screenshot, and page text?
+  - Compare the current state against the goal. If the goal was "click the first video" and you are now ON a video page → the goal IS achieved.
+  - If YES → immediately respond with instruct type "done". Do NOT repeat previous actions.
+  - If NO → explain briefly what is still missing, then decide the next action.
+
 ═══ RESPONSE FORMAT (pure JSON, nothing else) ═══
 
 {
   "thinking": {
+    "goal_check": "Is the goal already achieved? YES or NO, and why?",
     "state": "Brief: what page am I on, did the last command work?",
-    "target": "Brief: what element do I need to interact with next?",
-    "action_reason": "Brief: why this action, and why not an alternative?"
+    "target": "Brief: what element do I need to interact with next? (skip if goal achieved)",
+    "action_reason": "Brief: why this action, and why not an alternative? (skip if goal achieved)"
   },
   "instruct": {
     "type": "navigate | click | type | scroll | wait | done",
@@ -849,17 +858,19 @@ async function executeAgentCommand(instruct) {
     return { success: true, description: 'Waited for page to update.' };
   }
 
-  // NAVIGATE — go to a URL (with 15s timeout)
+  // NAVIGATE — go to a URL (wait 2s, extend to 8s if not loaded)
   if (type === 'navigate') {
     try {
       await chrome.tabs.update(tab.id, { url: instruct.url });
-      await new Promise((resolve) => {
+      let loaded = false;
+      const loadPromise = new Promise((resolve) => {
         const timeout = setTimeout(() => {
           chrome.tabs.onUpdated.removeListener(listener);
           resolve();
-        }, 15000);
+        }, 8000);
         function listener(tabId, changeInfo) {
           if (tabId === tab.id && changeInfo.status === 'complete') {
+            loaded = true;
             clearTimeout(timeout);
             chrome.tabs.onUpdated.removeListener(listener);
             resolve();
@@ -867,7 +878,11 @@ async function executeAgentCommand(instruct) {
         }
         chrome.tabs.onUpdated.addListener(listener);
       });
-      await delay(1000);
+      // Wait 2s first — if already loaded, proceed immediately
+      await delay(2000);
+      if (!loaded) {
+        await loadPromise; // wait up to remaining time (total 8s max)
+      }
       return { success: true, description: `Navigated to ${instruct.url}` };
     } catch (err) {
       return { success: false, error: err.message };
@@ -909,7 +924,7 @@ async function executeAgentCommand(instruct) {
         },
         args: [instruct.selector]
       });
-      await delay(1000);
+      await delay(2000);
       return results[0].result;
     } catch (err) {
       return { success: false, error: err.message };
@@ -1096,6 +1111,7 @@ async function handleAgentSend(userGoal) {
       const thinkingBody = document.createElement('div');
       thinkingBody.className = 'agent-thinking-body collapsed';
       const thinkingMd = [
+        `**Goal Check:** ${thinking.goal_check || '—'}`,
         `**State:** ${thinking.state || '—'}`,
         `**Target:** ${thinking.target || '—'}`,
         `**Reason:** ${thinking.action_reason || '—'}`
