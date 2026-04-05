@@ -380,6 +380,32 @@ body {
   background: rgba(255, 255, 255, 0.06);
 }
 
+/* Deep Think Toggle */
+#deep-think-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: none;
+  background: transparent;
+  color: #555;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: color 0.2s ease, background 0.2s ease;
+}
+
+#deep-think-button:hover {
+  color: #EAEAEA;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+#deep-think-button.active {
+  color: #FFB800;
+  background: rgba(255, 184, 0, 0.12);
+}
+
 /* Agent Mode Toggle */
 #agent-mode-button {
   display: flex;
@@ -440,4 +466,148 @@ body {
   color: #AAA;
   font-style: italic;
   margin: 10px 0;
+}
+
+/* ───────────────────────────────────────────────
+   AGENT THINKING BLOCK
+   ─────────────────────────────────────────────── */
+.agent-thinking {
+  background: rgba(138, 43, 226, 0.06);
+  border: 1px solid rgba(138, 43, 226, 0.15);
+  border-radius: 14px;
+  padding: 0;
+  overflow: hidden;
+}
+
+.agent-thinking-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 13px;
+  font-weight: 500;
+  color: #B388FF;
+  transition: background 0.2s;
+}
+
+.agent-thinking-header:hover {
+  background: rgba(138, 43, 226, 0.08);
+}
+
+.agent-thinking-icon {
+  font-size: 15px;
+}
+
+.agent-thinking-toggle {
+  margin-left: auto;
+  font-size: 10px;
+  color: #888;
+  transition: transform 0.2s;
+}
+
+.agent-thinking-body {
+  padding: 0 16px 14px;
+  font-size: 13px;
+  line-height: 1.65;
+  color: #CCC;
+  border-top: 1px solid rgba(138, 43, 226, 0.1);
+  max-height: 600px;
+  overflow-y: auto;
+  transition: max-height 0.35s ease, padding 0.35s ease, opacity 0.35s ease;
+}
+
+.agent-thinking-body.collapsed {
+  max-height: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  overflow: hidden;
+  opacity: 0;
+  border-top-color: transparent;
+}
+
+.agent-thinking-body h1,
+.agent-thinking-body h2,
+.agent-thinking-body h3 {
+  color: #E0C0FF;
+  font-size: 14px;
+  font-weight: 600;
+  margin: 14px 0 6px;
+}
+
+.agent-thinking-body strong {
+  color: #B388FF;
+}
+
+.agent-thinking-body p {
+  margin-bottom: 8px;
+}
+
+.agent-thinking-body ul,
+.agent-thinking-body ol {
+  margin-left: 18px;
+  margin-bottom: 8px;
+}
+
+.agent-thinking-body li {
+  margin-bottom: 4px;
+}
+
+/* ───────────────────────────────────────────────
+   AGENT COMMAND STEP
+   ─────────────────────────────────────────────── */
+.agent-command {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #CCC;
+}
+
+.agent-cmd-icon {
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.agent-command strong {
+  color: #EAEAEA;
+  font-weight: 600;
+}
+
+.agent-command span[style*="color:#4ade80"] {
+  margin-left: auto;
+}
+
+.agent-command span[style*="color:#ff6b6b"] {
+  margin-left: auto;
+  font-size: 12px;
+}
+
+/* ───────────────────────────────────────────────
+   STOP AGENT BUTTON
+   ─────────────────────────────────────────────── */
+#stop-agent-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(255, 75, 75, 0.12);
+  color: #ff4d4d;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+
+#stop-agent-button:hover {
+  background: rgba(255, 75, 75, 0.25);
+  color: #ff6b6b;
 }
