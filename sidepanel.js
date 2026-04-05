@@ -16,6 +16,55 @@ let conversationHistory = [];
 let agentModeActive = false;
 let deepThinkActive = false;
 
+// ─── Chat History Persistence ────────────────────────────
+// chatMessages stores {role, text, imageUrl} for DOM rebuild (no base64 images to save space)
+let chatMessages = [];
+
+function saveChatHistory() {
+  chrome.storage.local.set({
+    chatMessages: chatMessages,
+    conversationHistory: conversationHistory
+  });
+}
+
+function restoreChatHistory() {
+  chrome.storage.local.get(['chatMessages', 'conversationHistory'], (data) => {
+    if (data.chatMessages && data.chatMessages.length > 0) {
+      chatMessages = data.chatMessages;
+      conversationHistory = data.conversationHistory || [];
+
+      // Remove welcome screen
+      const welcome = chatContainer.querySelector('.welcome');
+      if (welcome) welcome.remove();
+
+      // Rebuild DOM
+      chatMessages.forEach((msg) => {
+        const div = document.createElement('div');
+        if (msg.role === 'user') {
+          div.className = 'message user';
+          if (msg.text) {
+            const p = document.createElement('p');
+            p.textContent = msg.text;
+            div.appendChild(p);
+          }
+        } else {
+          div.className = 'message ai stream-text';
+          if (typeof marked !== 'undefined') {
+            div.innerHTML = marked.parse(msg.text || '');
+          } else {
+            div.textContent = msg.text || '';
+          }
+        }
+        chatContainer.appendChild(div);
+      });
+      scrollToBottom();
+    }
+  });
+}
+
+// Load history on panel open
+restoreChatHistory();
+
 // Deep Think toggle
 deepThinkButton.addEventListener('click', () => {
   deepThinkActive = !deepThinkActive;
@@ -97,6 +146,8 @@ settingsButton.addEventListener('click', () => {
 clearButton.addEventListener('click', () => {
   chatContainer.innerHTML = '';
   conversationHistory = [];
+  chatMessages = [];
+  saveChatHistory();
   const welcome = document.createElement('div');
   welcome.className = 'welcome';
   welcome.innerHTML = `
@@ -250,6 +301,10 @@ function appendUserMessage(text, imageUrl) {
 
   chatContainer.appendChild(div);
   scrollToBottom();
+
+  // Save to persistent history
+  chatMessages.push({ role: 'user', text: text });
+  saveChatHistory();
 }
 
 function createThinkingState(initialText = 'thinking…') {
@@ -512,6 +567,8 @@ CRITICAL INSTRUCTIONS:
       answerDiv.className = 'message ai stream-text';
       chatContainer.appendChild(answerDiv);
       conversationHistory.push({ role: 'assistant', content: rawResult });
+      chatMessages.push({ role: 'assistant', text: finalAnswer });
+      saveChatHistory();
       streamText(finalAnswer, answerDiv);
 
     } else {
@@ -521,6 +578,8 @@ CRITICAL INSTRUCTIONS:
       answerDiv.className = 'message ai stream-text';
       chatContainer.appendChild(answerDiv);
       conversationHistory.push({ role: 'assistant', content: rawResult });
+      chatMessages.push({ role: 'assistant', text: rawResult });
+      saveChatHistory();
       streamText(rawResult, answerDiv);
     }
 
@@ -744,8 +803,10 @@ async function scrapePageForAgent() {
 function buildGoalAnalysisPrompt() {
   return `You are Alvelika Agent. The user just gave you a task.
 You receive the DOM and screenshot of the current page.
+You may also receive the user's PREVIOUS MESSAGES (conversation history) for context.
 
 Your job is to ANALYZE the user's request and produce a clear, precise goal.
+Use the conversation history to understand references like "do that again", "now search for the other one", "continue", etc.
 
 YOUR RESPONSE MUST BE PURE JSON:
 
@@ -753,15 +814,17 @@ YOUR RESPONSE MUST BE PURE JSON:
   "thinking": {
     "what_user_said": "What did the user literally ask for?",
     "what_user_wants": "What is the user truly trying to achieve? What information or outcome do they want?",
-    "key_details": "What specific details did the user mention that I must follow exactly? (e.g., specific website, specific query, specific action)"
+    "key_details": "What specific details did the user mention that I must follow exactly? (e.g., specific website, specific query, specific action)",
+    "history_context": "What relevant context from previous messages helps clarify this request? (write 'N/A' if no history or not relevant)"
   },
-  "user_goal": "A clear, precise, step-by-step rewrite of the user's goal. Be specific. Include every constraint the user mentioned."
+  "user_goal": "A clear, precise, step-by-step rewrite of the user's goal. Be specific. Include every constraint the user mentioned. Resolve any references to previous messages."
 }
 
 RULES:
 1. If the user mentioned a specific website (e.g., Google), that is a hard constraint — do NOT use a different website.
 2. Rewrite the goal so it cannot be misunderstood.
-3. Respond with PURE JSON only. No wrapping, no code fences, no extra text.`;
+3. If the user's request references previous messages (e.g., "do it again", "the same thing"), use the conversation history to resolve what they mean.
+4. Respond with PURE JSON only. No wrapping, no code fences, no extra text.`;
 }
 
 function buildAgentSystemPrompt(userGoal, previousValidateOption) {
@@ -993,6 +1056,9 @@ stopAgentButton.addEventListener('click', () => {
   agentRunning = false;
   hideAgentRunningUI();
   appendAIMessage('Agent stopped by user.', { className: 'message ai' });
+  conversationHistory.push({ role: 'assistant', content: '[Agent stopped by user before completing the task.]' });
+  chatMessages.push({ role: 'assistant', text: 'Agent stopped by user.' });
+  saveChatHistory();
 });
 
 async function handleAgentSend(userGoal) {
@@ -1005,6 +1071,9 @@ async function handleAgentSend(userGoal) {
   agentRunning = true;
   showAgentRunningUI();
 
+  // Push user message into shared conversation history so normal chat remembers it
+  conversationHistory.push({ role: 'user', content: userGoal });
+
   // ═══ STEP 0 — Analyze the user's raw prompt ═══
   const goalThinkingEl = createThinkingState('Understanding your goal…');
   chatContainer.appendChild(goalThinkingEl);
@@ -1014,8 +1083,18 @@ async function handleAgentSend(userGoal) {
   try {
     const goalPage = await scrapePageForAgent();
 
+    // Build full conversation history (user + AI messages) for context
+    const historyEntries = conversationHistory.map(msg => {
+      const role = msg.role === 'user' ? 'User' : 'Assistant';
+      const text = typeof msg.content === 'string' ? msg.content : (Array.isArray(msg.content) ? msg.content.filter(c => c.type === 'text').map(c => c.text).join(' ') : '');
+      return `[${role}]: ${text.substring(0, 500)}`;
+    });
+    const historyBlock = historyEntries.length > 0
+      ? `\n\nConversation history (oldest first):\n${historyEntries.join('\n')}`
+      : '';
+
     const goalUserContent = [
-      { type: 'text', text: `User's raw request: "${userGoal}"\n\nCurrent page title: ${goalPage.pageTitle}\nCurrent page URL: ${goalPage.pageUrl}\n\nPage text:\n${goalPage.pageText}` }
+      { type: 'text', text: `User's raw request: "${userGoal}"${historyBlock}\n\nCurrent page title: ${goalPage.pageTitle}\nCurrent page URL: ${goalPage.pageUrl}\n\nPage text:\n${goalPage.pageText}` }
     ];
     if (goalPage.screenshot) {
       goalUserContent.push({ type: 'image_url', image_url: { url: goalPage.screenshot, detail: 'low' } });
@@ -1153,7 +1232,12 @@ async function handleAgentSend(userGoal) {
 
     // ── 8. Check if done ──
     if (instruct.type === 'done') {
-      appendAIMessage(instruct.description || 'Goal completed.', { stream: true });
+      const doneText = instruct.description || 'Goal completed.';
+      appendAIMessage(doneText, { stream: true });
+      // Feed agent result back into shared conversation history
+      conversationHistory.push({ role: 'assistant', content: `[Agent completed] Goal: ${refinedGoal}\nResult: ${doneText}` });
+      chatMessages.push({ role: 'assistant', text: doneText });
+      saveChatHistory();
       agentRunning = false;
       break;
     }
@@ -1170,7 +1254,11 @@ async function handleAgentSend(userGoal) {
   }
 
   if (stepCount >= AGENT_MAX_STEPS) {
-    appendAIMessage(`Agent reached the maximum of ${AGENT_MAX_STEPS} steps. Stopping.`, { className: 'message ai' });
+    const maxMsg = `Agent reached the maximum of ${AGENT_MAX_STEPS} steps. Stopping.`;
+    appendAIMessage(maxMsg, { className: 'message ai' });
+    conversationHistory.push({ role: 'assistant', content: `[Agent stopped - max steps] Goal: ${refinedGoal}\nStopped after ${stepCount} steps.` });
+    chatMessages.push({ role: 'assistant', text: maxMsg });
+    saveChatHistory();
   }
 
   agentRunning = false;
