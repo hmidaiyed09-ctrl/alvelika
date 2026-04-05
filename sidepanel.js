@@ -608,6 +608,42 @@ async function scrapePageForAgent() {
           return `${tag}:nth-of-type(${index + 1})`;
         }
 
+        // ── Ad Detection ──
+        const adSelectors = [
+          'ytd-ad-slot-renderer', 'ytd-promoted-sparkles-web-renderer',
+          'ytd-promoted-video-renderer', 'ytd-display-ad-renderer',
+          'ytd-banner-promo-renderer', 'ytd-statement-banner-renderer',
+          '.ad-container', '.ad-slot', '.ad-banner', '.ad-wrapper',
+          '[data-ad]', '[data-ad-slot]', '[data-google-query-id]',
+          '[id^="google_ads"]', '[id^="div-gpt-ad"]',
+          'ins.adsbygoogle', '[aria-label*="advertisement"]',
+          '.sponsored', '[data-sponsored]',
+          'iframe[src*="doubleclick"]', 'iframe[src*="googlesyndication"]',
+          'iframe[src*="ads"]'
+        ];
+        const adContainers = new Set();
+        adSelectors.forEach(sel => {
+          try {
+            document.querySelectorAll(sel).forEach(ad => adContainers.add(ad));
+          } catch(e) {}
+        });
+        // Also detect by text content "Sponsored" or "Ad" badges
+        document.querySelectorAll('[class*="badge"], [class*="label"], span, div').forEach(el => {
+          const txt = (el.textContent || '').trim().toLowerCase();
+          if ((txt === 'ad' || txt === 'ads' || txt === 'sponsored' || txt === 'advertisement') && el.offsetHeight > 0) {
+            // Mark the closest major parent as ad
+            const adParent = el.closest('ytd-video-renderer, ytd-reel-shelf-renderer, [class*="renderer"], article, section, li, div[class]');
+            if (adParent) adContainers.add(adParent);
+          }
+        });
+
+        function isInsideAd(el) {
+          for (const ad of adContainers) {
+            if (ad.contains(el)) return true;
+          }
+          return false;
+        }
+
         // ── Collect & categorize ──
         const inputs = [];
         const buttons = [];
@@ -620,6 +656,8 @@ async function scrapePageForAgent() {
         allElements.forEach((el) => {
           const rect = el.getBoundingClientRect();
           if (rect.width === 0 && rect.height === 0) return;
+          // Skip elements inside ad containers
+          if (isInsideAd(el)) return;
 
           const tag = el.tagName.toLowerCase();
           const text = (el.textContent || '').trim().substring(0, 80);
