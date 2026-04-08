@@ -14,7 +14,7 @@
       <span class="header-title">Alvelika</span>
     </div>
     <div class="header-actions">
-      <button id="clear-button" aria-label="Clear Chat" title="Clear Chat">
+      <button id="clear-button" aria-label="Clear Chat" title="New Chat">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <polyline points="3 6 5 6 21 6"></polyline>
           <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
@@ -41,39 +41,40 @@
     <div class="input-pill">
       <input type="file" id="image-upload" accept="image/*" class="hidden">
       <button id="deep-think-button" aria-label="Deep Thinking" title="Deep Thinking">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M12 2C8.13 2 5 5.13 5 9c0 2.38 1.19 4.47 3 5.74V17a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1v-2.26c1.81-1.27 3-3.36 3-5.74 0-3.87-3.13-7-7-7z"/>
           <line x1="9" y1="21" x2="15" y2="21"/>
           <line x1="10" y1="24" x2="14" y2="24"/>
         </svg>
       </button>
       <button id="agent-mode-button" aria-label="Agent Mode" title="Agent Mode">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M12 2a4 4 0 0 1 4 4v2a4 4 0 0 1-8 0V6a4 4 0 0 1 4-4z"/>
           <path d="M18 14c2 1 3 3 3 5v2H3v-2c0-2 1-4 3-5"/>
           <circle cx="12" cy="6" r="1"/>
         </svg>
       </button>
       <button id="upload-button" aria-label="Upload Image" title="Upload Image">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <line x1="12" y1="5" x2="12" y2="19"></line>
           <line x1="5" y1="12" x2="19" y2="12"></line>
         </svg>
       </button>
       <textarea id="chat-input" placeholder="Ask anything…" rows="1"></textarea>
       <button id="send-button" aria-label="Send">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M5 12h14M12 5l7 7-7 7"/>
         </svg>
       </button>
       <button id="stop-agent-button" class="hidden" aria-label="Stop Agent" title="Stop Agent">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <rect x="6" y="6" width="12" height="12" rx="2"/>
         </svg>
       </button>
     </div>
   </footer>
 
+  <script src="pdf.min.js"></script>
   <script src="marked.min.js"></script>
   <script src="sidepanel.js"></script>
 </body>

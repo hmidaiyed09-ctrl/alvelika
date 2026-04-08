@@ -166,7 +166,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
     // Get target language from settings
     const config = await chrome.storage.local.get(['translateLang']);
-    const targetLang = config.translateLang || 'ar';
+    const targetLang = config.translateLang || 'en';
 
     try {
       const response = await chrome.runtime.sendMessage({

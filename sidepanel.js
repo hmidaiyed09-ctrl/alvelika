@@ -1,3 +1,41 @@
+// ─── Configure marked.js for tight output (no excessive spacing) ───
+if (typeof marked !== 'undefined') {
+  marked.setOptions({
+    breaks: false,
+    gfm: true
+  });
+  
+  const renderer = {
+    code(token) {
+      const text = typeof token === 'object' ? token.text : arguments[0];
+      const lang = typeof token === 'object' ? token.lang : arguments[1];
+      
+      return `<div class="code-block-wrapper"><div class="code-block-header"><button class="copy-btn"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg> Copy</button></div><pre><code class="language-${lang || ''}">${text}</code></pre></div>`;
+    }
+  };
+  marked.use({ renderer });
+}
+
+// ─── Global code copy listener ───
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('.copy-btn');
+  if (btn) {
+    const container = btn.closest('.code-block-wrapper');
+    const codeBlock = container.querySelector('code');
+    if (codeBlock) {
+      navigator.clipboard.writeText(codeBlock.innerText);
+      const originalHTML = btn.innerHTML;
+      btn.innerHTML = 'Copied!';
+      setTimeout(() => btn.innerHTML = originalHTML, 2000);
+    }
+  }
+});
+
+// ─── Configure PDF.js worker ───
+if (typeof pdfjsLib !== 'undefined') {
+  pdfjsLib.GlobalWorkerOptions.workerSrc = 'pdf.worker.min.js';
+}
+
 const chatContainer = document.getElementById('chat-container');
 const chatInput = document.getElementById('chat-input');
 const sendButton = document.getElementById('send-button');
@@ -12,58 +50,51 @@ const stopAgentButton = document.getElementById('stop-agent-button');
 
 let userHasScrolledUp = false;
 let selectedImage = null;
+let selectedPdfText = null;
+let selectedPdfName = null;
 let conversationHistory = [];
 let agentModeActive = false;
 let deepThinkActive = false;
 
-// ─── Chat History Persistence ────────────────────────────
-// chatMessages stores {role, text, imageUrl} for DOM rebuild (no base64 images to save space)
-let chatMessages = [];
+// ─── Initialize Chat State ───
+document.addEventListener('DOMContentLoaded', async () => {
+  const data = await chrome.storage.local.get(['conversationHistory']);
+  if (data.conversationHistory && Array.isArray(data.conversationHistory) && data.conversationHistory.length > 0) {
+    conversationHistory = data.conversationHistory;
+    
+    // Hide welcome message
+    const welcome = chatContainer.querySelector('.welcome');
+    if (welcome) welcome.remove();
 
-function saveChatHistory() {
-  chrome.storage.local.set({
-    chatMessages: chatMessages,
-    conversationHistory: conversationHistory
-  });
-}
-
-function restoreChatHistory() {
-  chrome.storage.local.get(['chatMessages', 'conversationHistory'], (data) => {
-    if (data.chatMessages && data.chatMessages.length > 0) {
-      chatMessages = data.chatMessages;
-      conversationHistory = data.conversationHistory || [];
-
-      // Remove welcome screen
-      const welcome = chatContainer.querySelector('.welcome');
-      if (welcome) welcome.remove();
-
-      // Rebuild DOM
-      chatMessages.forEach((msg) => {
-        const div = document.createElement('div');
-        if (msg.role === 'user') {
-          div.className = 'message user';
-          if (msg.text) {
-            const p = document.createElement('p');
-            p.textContent = msg.text;
-            div.appendChild(p);
+    // Re-render history
+    for (const msg of conversationHistory) {
+      if (msg.role === 'user') {
+        // Handle potential array format for user content (text + images)
+        let textContent = '';
+        let imgContent = null;
+        if (Array.isArray(msg.content)) {
+          for (const item of msg.content) {
+            if (item.type === 'text') textContent = item.text;
+            if (item.type === 'image_url') imgContent = item.image_url.url;
           }
         } else {
-          div.className = 'message ai stream-text';
-          if (typeof marked !== 'undefined') {
-            div.innerHTML = marked.parse(msg.text || '');
-          } else {
-            div.textContent = msg.text || '';
-          }
+          textContent = msg.content;
         }
+        appendUserMessage(textContent, imgContent, false); // false prevents saving again
+      } else if (msg.role === 'assistant') {
+        const div = document.createElement('div');
+        div.className = 'message ai stream-text';
         chatContainer.appendChild(div);
-      });
-      scrollToBottom();
+        if (typeof marked !== 'undefined') {
+          div.innerHTML = marked.parse(msg.content);
+        } else {
+          div.textContent = msg.content;
+        }
+      }
     }
-  });
-}
-
-// Load history on panel open
-restoreChatHistory();
+    scrollToBottom();
+  }
+});
 
 // Deep Think toggle
 deepThinkButton.addEventListener('click', () => {
@@ -108,8 +139,8 @@ chatInput.addEventListener('input', function () {
 
 function updateSendButtonColor() {
   const hasText = chatInput.value.trim().length > 0;
-  const hasImage = !!selectedImage;
-  sendButton.style.color = (hasText || hasImage) ? '#EAEAEA' : '#A0A0A0';
+  const hasAttachment = !!selectedImage || !!selectedPdfText;
+  sendButton.style.color = (hasText || hasAttachment) ? '#e8e8ef' : '#5e5e76';
 }
 
 chatInput.addEventListener('keydown', (e) => {
@@ -146,8 +177,7 @@ settingsButton.addEventListener('click', () => {
 clearButton.addEventListener('click', () => {
   chatContainer.innerHTML = '';
   conversationHistory = [];
-  chatMessages = [];
-  saveChatHistory();
+  chrome.storage.local.remove(['conversationHistory']);
   const welcome = document.createElement('div');
   welcome.className = 'welcome';
   welcome.innerHTML = `
@@ -165,6 +195,33 @@ uploadButton.addEventListener('click', () => {
 imageUpload.addEventListener('change', (e) => {
   const file = e.target.files[0];
   if (!file) return;
+
+  if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
+    const reader = new FileReader();
+    reader.onload = async (event) => {
+      try {
+        const typedarray = new Uint8Array(event.target.result);
+        const pdf = await pdfjsLib.getDocument(typedarray).promise;
+        let fullText = '';
+        for (let i = 1; i <= pdf.numPages; i++) {
+          const page = await pdf.getPage(i);
+          const textContent = await page.getTextContent();
+          const pageText = textContent.items.map(item => item.str).join(' ');
+          fullText += `[Page ${i}]\n${pageText}\n\n`;
+        }
+        selectedPdfText = fullText;
+        selectedPdfName = file.name;
+        
+        // Show a generic document icon or the plugin logo for the preview
+        showImagePreview('logo.png');
+        updateSendButtonColor();
+      } catch (err) {
+        console.error("PDF Extraction error:", err);
+      }
+    };
+    reader.readAsArrayBuffer(file);
+    return;
+  }
 
   const reader = new FileReader();
   reader.onload = (event) => {
@@ -188,6 +245,8 @@ function showImagePreview(src) {
 
   item.querySelector('.remove-preview').addEventListener('click', () => {
     selectedImage = null;
+    selectedPdfText = null;
+    selectedPdfName = null;
     imagePreviewContainer.innerHTML = '';
     imagePreviewContainer.classList.add('hidden');
     imageUpload.value = '';
@@ -201,19 +260,26 @@ sendButton.addEventListener('click', () => handleSend());
 
 async function handleSend() {
   const text = chatInput.value.trim();
-  if (!text && !selectedImage) return;
+  if (!text && !selectedImage && !selectedPdfText) return;
 
   // Hide welcome if present
   const welcome = chatContainer.querySelector('.welcome');
   if (welcome) welcome.remove();
 
   const currentImage = selectedImage;
-  appendUserMessage(text, currentImage);
+  const currentPdfText = selectedPdfText;
+  const currentPdfName = selectedPdfName;
+  
+  // Provide UX feedback for PDF upload in chat
+  const messageText = currentPdfText && !text ? `Uploaded PDF: ${currentPdfName}` : text;
+  appendUserMessage(messageText, currentImage);
 
   // Clear input and previews
   chatInput.value = '';
   chatInput.style.height = 'auto';
   selectedImage = null;
+  selectedPdfText = null;
+  selectedPdfName = null;
   imagePreviewContainer.innerHTML = '';
   imagePreviewContainer.classList.add('hidden');
   imageUpload.value = '';
@@ -279,10 +345,15 @@ async function handleSend() {
   chatContainer.appendChild(thinkingEl);
   scrollToBottom();
 
-  await processLLMResponse(text, pageContext, thinkingEl, currentImage, screenshotUrl, deepThinkActive);
+  let finalMessageToAI = messageText;
+  if (currentPdfText) {
+    finalMessageToAI += `\n\n[Attached Document: ${currentPdfName}]\n<pdf_content>\n${currentPdfText}\n</pdf_content>`;
+  }
+
+  await processLLMResponse(finalMessageToAI, pageContext, thinkingEl, currentImage, screenshotUrl, deepThinkActive);
 }
 
-function appendUserMessage(text, imageUrl) {
+function appendUserMessage(text, imageUrl, saveToHistory = true) {
   const div = document.createElement('div');
   div.className = 'message user';
 
@@ -301,10 +372,6 @@ function appendUserMessage(text, imageUrl) {
 
   chatContainer.appendChild(div);
   scrollToBottom();
-
-  // Save to persistent history
-  chatMessages.push({ role: 'user', text: text });
-  saveChatHistory();
 }
 
 function createThinkingState(initialText = 'thinking…') {
@@ -397,11 +464,12 @@ async function getApiConfig() {
 }
 
 // ─── Shared: Make an LLM API call ────────────────────────
-async function callLLM(apiConfig, messages) {
+async function callLLM(apiConfig, messages, signal) {
   const response = await fetch(apiConfig.baseUrl, {
     method: 'POST',
     headers: apiConfig.headers,
-    body: JSON.stringify({ model: apiConfig.model, messages, stream: false })
+    body: JSON.stringify({ model: apiConfig.model, messages, stream: false }),
+    signal
   });
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
@@ -491,30 +559,37 @@ CRITICAL INSTRUCTIONS:
 
 3. Inside <answer>, write your final response informed by all 12 answers above.
 4. PROVE YOU ARE WATCHING: If the page is relevant, mention a specific detail from the page (like the title, a name, or a fact).
-5. BE KIND & ELEGANT: Use Markdown (###, **, -) to make the answer beautiful.`
-    : `You are Alvelika, a sophisticated and proactive AI research assistant. 
-You are "watching" the screen with the user. You receive both the page's text AND a screenshot of what they currently see.
+5. BE KIND & ELEGANT: Use Markdown (###, **, -) to make the answer beautiful. NO EMOJIS ALLOWED.`
+    : `You are Alvelika, a dedicated educational AI assistant designed to help students deeply understand documents and web pages.
+You are "watching" the screen with the student. You receive both the page's text AND a screenshot of what they currently see.
+You are part of a persistent chat session. The user may switch between normal chat and "Agent mode" (where you autonomously perform browser actions). The conversation history below contains ALL messages — including agent task requests, agent results, and agent interruptions. Use this history to understand what has happened so far.
 
-CURRENT PAGE CONTEXT:
+CURRENT PAGE / DOCUMENT CONTEXT:
 <page_context>
 ${contextData}
 </page_context>
 
 CRITICAL INSTRUCTIONS:
-1. Respond directly to the user. Do NOT use any XML tags like <thought> or <answer>. Just write the response.
-2. PROVE YOU ARE WATCHING: Mention a specific detail from the page (like the title, a name, or a fact) if relevant.
-3. BE KIND & ELEGANT: Use Markdown (###, **, -) to make the answer beautiful.`;
+1. EDUCATIONAL FOCUS: Your primary goal is to help students learn. When analyzing documents or pages, proactively explain difficult terminology, break down complex concepts into student-friendly language, and help them understand the broader context of why this page/document is useful to them.
+2. Respond directly to the user. Do NOT use any XML tags like <thought> or <answer>. Just write the response.
+3. PROVE YOU ARE WATCHING: When relevant, explicitly mention specific details, terms, or phrases from the page context to anchor your explanations in what the student is actively looking at.
+4. BE KIND, ENCOURAGING & ELEGANT: Use a supportive, teacher-like tone. Use Markdown (###, **, -) to make the answer beautiful and easy to read. YOU MUST NOT USE ANY EMOJIS (NO SMILEYS, NO ICONS) UNDER ANY CIRCUMSTANCES.
+5. If the conversation history contains agent results, you are aware of what happened and can reference those results naturally.`;
 
   // Push user message into conversation history
   conversationHistory.push({ role: 'user', content: userContent });
+  chrome.storage.local.set({ conversationHistory });
 
   const messages = [
     { role: 'system', content: systemPrompt },
     ...conversationHistory
   ];
 
+  currentAbortController = new AbortController();
+  showAgentRunningUI();
+
   try {
-    const rawResult = await callLLM(apiConfig, messages);
+    const rawResult = await callLLM(apiConfig, messages, currentAbortController.signal);
 
     if (isDeepThink) {
       let thinkingText = '';
@@ -567,9 +642,8 @@ CRITICAL INSTRUCTIONS:
       answerDiv.className = 'message ai stream-text';
       chatContainer.appendChild(answerDiv);
       conversationHistory.push({ role: 'assistant', content: rawResult });
-      chatMessages.push({ role: 'assistant', text: finalAnswer });
-      saveChatHistory();
-      streamText(finalAnswer, answerDiv);
+      chrome.storage.local.set({ conversationHistory });
+      await streamText(finalAnswer, answerDiv, currentAbortController.signal);
 
     } else {
       await fadeOutAndRemove(thinkingEl, 400);
@@ -578,14 +652,20 @@ CRITICAL INSTRUCTIONS:
       answerDiv.className = 'message ai stream-text';
       chatContainer.appendChild(answerDiv);
       conversationHistory.push({ role: 'assistant', content: rawResult });
-      chatMessages.push({ role: 'assistant', text: rawResult });
-      saveChatHistory();
-      streamText(rawResult, answerDiv);
+      chrome.storage.local.set({ conversationHistory });
+      await streamText(rawResult, answerDiv, currentAbortController.signal);
     }
 
   } catch (err) {
-    thinkingEl.textContent = `Error: ${err.message}`;
-    console.error('LLM Request failed:', err);
+    if (err.name === 'AbortError' || err.message.includes('aborted')) {
+      thinkingEl.textContent = 'Request stopped by user.';
+    } else {
+      thinkingEl.textContent = `Error: ${err.message}`;
+      console.error('LLM Request failed:', err);
+    }
+  } finally {
+    hideAgentRunningUI();
+    currentAbortController = null;
   }
 }
 
@@ -1040,6 +1120,7 @@ async function executeAgentCommand(instruct) {
 }
 
 let agentRunning = false;
+let currentAbortController = null;
 const AGENT_MAX_STEPS = 15;
 
 function showAgentRunningUI() {
@@ -1052,13 +1133,26 @@ function hideAgentRunningUI() {
   sendButton.classList.remove('hidden');
 }
 
+let activeAgentThinkingEl = null;
+
 stopAgentButton.addEventListener('click', () => {
+  if (currentAbortController) {
+    currentAbortController.abort();
+    currentAbortController = null;
+  }
+  
   agentRunning = false;
   hideAgentRunningUI();
-  appendAIMessage('Agent stopped by user.', { className: 'message ai' });
-  conversationHistory.push({ role: 'assistant', content: '[Agent stopped by user before completing the task.]' });
-  chatMessages.push({ role: 'assistant', text: 'Agent stopped by user.' });
-  saveChatHistory();
+  
+  // Remove any active thinking indicator
+  if (activeAgentThinkingEl && activeAgentThinkingEl.isConnected) {
+    activeAgentThinkingEl.remove();
+    activeAgentThinkingEl = null;
+  }
+  appendAIMessage('Request stopped by user.', { className: 'message ai' });
+  // Record the stop event in conversation history so the AI remembers
+  conversationHistory.push({ role: 'assistant', content: '[Request stopped by user.]' });
+  chrome.storage.local.set({ conversationHistory });
 });
 
 async function handleAgentSend(userGoal) {
@@ -1069,13 +1163,16 @@ async function handleAgentSend(userGoal) {
   }
 
   agentRunning = true;
+  currentAbortController = new AbortController();
   showAgentRunningUI();
 
   // Push user message into shared conversation history so normal chat remembers it
   conversationHistory.push({ role: 'user', content: userGoal });
+  chrome.storage.local.set({ conversationHistory });
 
   // ═══ STEP 0 — Analyze the user's raw prompt ═══
   const goalThinkingEl = createThinkingState('Understanding your goal…');
+  activeAgentThinkingEl = goalThinkingEl;
   chatContainer.appendChild(goalThinkingEl);
   scrollToBottom();
 
@@ -1116,6 +1213,7 @@ async function handleAgentSend(userGoal) {
     updateThinkingState(goalThinkingEl, 'Goal understood.');
     await delay(400);
     await fadeOutAndRemove(goalThinkingEl, 300);
+    activeAgentThinkingEl = null;
 
     const goalDiv = document.createElement('div');
     goalDiv.className = 'message ai agent-command';
@@ -1125,6 +1223,7 @@ async function handleAgentSend(userGoal) {
 
   } catch (err) {
     await fadeOutAndRemove(goalThinkingEl, 300);
+    activeAgentThinkingEl = null;
     console.log('Goal analysis failed, using raw prompt:', err);
   }
 
@@ -1139,6 +1238,7 @@ async function handleAgentSend(userGoal) {
 
     // ── Show thinking state ──
     const thinkingEl = createThinkingState(`Step ${stepCount} — Analyzing the page…`);
+    activeAgentThinkingEl = thinkingEl;
     chatContainer.appendChild(thinkingEl);
     scrollToBottom();
 
@@ -1160,12 +1260,13 @@ async function handleAgentSend(userGoal) {
       const rawResult = await callLLM(apiConfig, [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userContent }
-      ]);
+      ], currentAbortController.signal);
 
       // Strip code fences if AI wraps in ```json
       const cleaned = rawResult.replace(/^```json?\s*/i, '').replace(/```\s*$/i, '').trim();
       parsed = JSON.parse(cleaned);
     } catch (err) {
+      if (err.name === 'AbortError' || err.message.includes('aborted')) break;
       await fadeOutAndRemove(thinkingEl, 400);
       appendAIMessage(`Agent error at step ${stepCount}: ${err.message}`, { className: 'message ai' });
       agentRunning = false;
@@ -1176,6 +1277,7 @@ async function handleAgentSend(userGoal) {
     updateThinkingState(thinkingEl, `Step ${stepCount} — Thinking…`);
     await delay(400);
     await fadeOutAndRemove(thinkingEl, 300);
+    activeAgentThinkingEl = null;
 
     const thinking = parsed.thinking;
     if (thinking) {
@@ -1234,10 +1336,9 @@ async function handleAgentSend(userGoal) {
     if (instruct.type === 'done') {
       const doneText = instruct.description || 'Goal completed.';
       appendAIMessage(doneText, { stream: true });
-      // Feed agent result back into shared conversation history
+      // Feed agent result back into shared conversation history so normal chat remembers it
       conversationHistory.push({ role: 'assistant', content: `[Agent completed] Goal: ${refinedGoal}\nResult: ${doneText}` });
-      chatMessages.push({ role: 'assistant', text: doneText });
-      saveChatHistory();
+      chrome.storage.local.set({ conversationHistory });
       agentRunning = false;
       break;
     }
@@ -1257,15 +1358,15 @@ async function handleAgentSend(userGoal) {
     const maxMsg = `Agent reached the maximum of ${AGENT_MAX_STEPS} steps. Stopping.`;
     appendAIMessage(maxMsg, { className: 'message ai' });
     conversationHistory.push({ role: 'assistant', content: `[Agent stopped - max steps] Goal: ${refinedGoal}\nStopped after ${stepCount} steps.` });
-    chatMessages.push({ role: 'assistant', text: maxMsg });
-    saveChatHistory();
+    chrome.storage.local.set({ conversationHistory });
   }
 
+  activeAgentThinkingEl = null;
   agentRunning = false;
   hideAgentRunningUI();
 }
 
-function streamText(fullText, container) {
+function streamText(fullText, container, signal) {
   return new Promise((resolve) => {
     if (!fullText) {
       container.textContent = '';
@@ -1277,6 +1378,12 @@ function streamText(fullText, container) {
     let currentText = '';
 
     const interval = setInterval(() => {
+      if (signal && signal.aborted) {
+        clearInterval(interval);
+        resolve();
+        return;
+      }
+
       currentText += fullText.charAt(i);
 
       if (typeof marked !== 'undefined') {
