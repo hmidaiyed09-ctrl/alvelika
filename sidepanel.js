@@ -31,6 +31,57 @@ document.addEventListener('click', (e) => {
   }
 });
 
+// ─── Page reference chips — convert [[ref:N]] to clickable elements ───
+function processPageReferences(container) {
+  const html = container.innerHTML;
+  if (!html.includes('[[ref:')) return;
+
+  container.innerHTML = html.replace(/\[\[ref:(\d+)\]\]/g, (match, id) => {
+    const section = pageSections.find(s => s.id === parseInt(id));
+    if (!section) return match;
+    const title = section.title.replace(/"/g, '&quot;').replace(/</g, '&lt;');
+    return `<button class="page-ref-chip" data-ref-id="${id}" title="View referenced section">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+      ${title.substring(0, 40)}${title.length > 40 ? '…' : ''}
+    </button>`;
+  });
+}
+
+// ─── Page reference popup handler ───
+document.addEventListener('click', (e) => {
+  const chip = e.target.closest('.page-ref-chip');
+
+  // Close any existing popup if clicking elsewhere
+  const existingPopup = document.querySelector('.page-ref-popup');
+  if (existingPopup && !chip) {
+    existingPopup.remove();
+    return;
+  }
+
+  if (!chip) return;
+
+  // Remove existing popup
+  if (existingPopup) existingPopup.remove();
+
+  const refId = parseInt(chip.dataset.refId);
+  const section = pageSections.find(s => s.id === refId);
+  if (!section) return;
+
+  const popup = document.createElement('div');
+  popup.className = 'page-ref-popup';
+  popup.innerHTML = `
+    <div class="page-ref-popup-header">
+      <span class="page-ref-popup-title">${section.title}</span>
+      <button class="page-ref-popup-close">&times;</button>
+    </div>
+    <div class="page-ref-popup-body">${section.content.replace(/</g, '&lt;').replace(/\n/g, '<br>')}</div>
+  `;
+
+  popup.querySelector('.page-ref-popup-close').addEventListener('click', () => popup.remove());
+
+  chip.closest('.message').appendChild(popup);
+});
+
 // ─── Configure PDF.js worker ───
 if (typeof pdfjsLib !== 'undefined') {
   pdfjsLib.GlobalWorkerOptions.workerSrc = 'pdf.worker.min.js';
@@ -49,12 +100,12 @@ const deepThinkButton = document.getElementById('deep-think-button');
 const stopAgentButton = document.getElementById('stop-agent-button');
 
 let userHasScrolledUp = false;
-let selectedImage = null;
-let selectedPdfText = null;
-let selectedPdfName = null;
+let selectedImages = [];
+let selectedDocuments = []; // Array of { name, content }
 let conversationHistory = [];
 let agentModeActive = false;
 let deepThinkActive = false;
+let pageSections = []; // Stores extracted page sections for references
 
 // ─── Initialize Chat State ───
 document.addEventListener('DOMContentLoaded', async () => {
@@ -139,7 +190,7 @@ chatInput.addEventListener('input', function () {
 
 function updateSendButtonColor() {
   const hasText = chatInput.value.trim().length > 0;
-  const hasAttachment = !!selectedImage || !!selectedPdfText;
+  const hasAttachment = selectedImages.length > 0 || selectedDocuments.length > 0;
   sendButton.style.color = (hasText || hasAttachment) ? '#e8e8ef' : '#5e5e76';
 }
 
@@ -159,8 +210,8 @@ chatInput.addEventListener('paste', (e) => {
       const blob = item.getAsFile();
       const reader = new FileReader();
       reader.onload = (event) => {
-        selectedImage = event.target.result;
-        showImagePreview(selectedImage);
+        selectedImages.push(event.target.result);
+        addImagePreview(event.target.result, selectedImages.length - 1);
         updateSendButtonColor();
       };
       reader.readAsDataURL(blob);
@@ -193,62 +244,100 @@ uploadButton.addEventListener('click', () => {
 });
 
 imageUpload.addEventListener('change', (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
+  const files = Array.from(e.target.files);
+  if (!files.length) return;
 
-  if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
-    const reader = new FileReader();
-    reader.onload = async (event) => {
-      try {
-        const typedarray = new Uint8Array(event.target.result);
-        const pdf = await pdfjsLib.getDocument(typedarray).promise;
-        let fullText = '';
-        for (let i = 1; i <= pdf.numPages; i++) {
-          const page = await pdf.getPage(i);
-          const textContent = await page.getTextContent();
-          const pageText = textContent.items.map(item => item.str).join(' ');
-          fullText += `[Page ${i}]\n${pageText}\n\n`;
+  for (const file of files) {
+    if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
+      const reader = new FileReader();
+      reader.onload = async (event) => {
+        try {
+          const typedarray = new Uint8Array(event.target.result);
+          const pdf = await pdfjsLib.getDocument(typedarray).promise;
+          let fullText = '';
+          for (let i = 1; i <= pdf.numPages; i++) {
+            const page = await pdf.getPage(i);
+            const textContent = await page.getTextContent();
+            const pageText = textContent.items.map(item => item.str).join(' ');
+            fullText += `[Page ${i}]\n${pageText}\n\n`;
+          }
+          addDocument(file.name, fullText);
+        } catch (err) {
+          console.error("PDF Extraction error:", err);
         }
-        selectedPdfText = fullText;
-        selectedPdfName = file.name;
-        
-        // Show a generic document icon or the plugin logo for the preview
-        showImagePreview('logo.png');
+      };
+      reader.readAsArrayBuffer(file);
+    } else if (file.type.startsWith('image/')) {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        selectedImages.push(event.target.result);
+        addImagePreview(event.target.result, selectedImages.length - 1);
         updateSendButtonColor();
-      } catch (err) {
-        console.error("PDF Extraction error:", err);
-      }
-    };
-    reader.readAsArrayBuffer(file);
-    return;
+      };
+      reader.readAsDataURL(file);
+    } else {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        addDocument(file.name, event.target.result);
+      };
+      reader.readAsText(file);
+    }
   }
-
-  const reader = new FileReader();
-  reader.onload = (event) => {
-    selectedImage = event.target.result;
-    showImagePreview(selectedImage);
-    updateSendButtonColor();
-  };
-  reader.readAsDataURL(file);
 });
 
-function showImagePreview(src) {
-  imagePreviewContainer.innerHTML = '';
+function addImagePreview(src, index) {
   imagePreviewContainer.classList.remove('hidden');
 
   const item = document.createElement('div');
   item.className = 'preview-item';
+  item.dataset.index = index;
   item.innerHTML = `
     <img src="${src}" alt="Preview">
     <button class="remove-preview">&times;</button>
   `;
 
   item.querySelector('.remove-preview').addEventListener('click', () => {
-    selectedImage = null;
-    selectedPdfText = null;
-    selectedPdfName = null;
-    imagePreviewContainer.innerHTML = '';
-    imagePreviewContainer.classList.add('hidden');
+    selectedImages[index] = null;
+    item.remove();
+    // Hide container if no previews left
+    if (!imagePreviewContainer.querySelector('.preview-item')) {
+      imagePreviewContainer.classList.add('hidden');
+    }
+    imageUpload.value = '';
+    updateSendButtonColor();
+  });
+
+  imagePreviewContainer.appendChild(item);
+}
+
+function addDocument(name, content) {
+  const docIndex = selectedDocuments.length;
+  selectedDocuments.push({ name, content });
+  showDocumentPreview(name, docIndex);
+  updateSendButtonColor();
+}
+
+function showDocumentPreview(name, index) {
+  imagePreviewContainer.classList.remove('hidden');
+
+  const item = document.createElement('div');
+  item.className = 'preview-item pdf-preview';
+  item.dataset.docIndex = index;
+  
+  const extMatch = name.match(/\.([a-zA-Z0-9]+)$/);
+  const ext = extMatch ? extMatch[1].toUpperCase() : 'TXT';
+  
+  item.innerHTML = `
+    <div class="pdf-preview-label" title="${name}">${ext.length > 4 ? ext.substring(0, 4) : ext}</div>
+    <button class="remove-preview">&times;</button>
+  `;
+
+  item.querySelector('.remove-preview').addEventListener('click', () => {
+    selectedDocuments[index] = null;
+    item.remove();
+    if (!imagePreviewContainer.querySelector('.preview-item')) {
+      imagePreviewContainer.classList.add('hidden');
+    }
     imageUpload.value = '';
     updateSendButtonColor();
   });
@@ -260,26 +349,33 @@ sendButton.addEventListener('click', () => handleSend());
 
 async function handleSend() {
   const text = chatInput.value.trim();
-  if (!text && !selectedImage && !selectedPdfText) return;
+  const currentDocs = selectedDocuments.filter(doc => doc !== null);
+  const hasImages = selectedImages.some(img => img !== null);
+  if (!text && !hasImages && currentDocs.length === 0) return;
 
   // Hide welcome if present
   const welcome = chatContainer.querySelector('.welcome');
   if (welcome) welcome.remove();
 
-  const currentImage = selectedImage;
-  const currentPdfText = selectedPdfText;
-  const currentPdfName = selectedPdfName;
+  const currentImages = selectedImages.filter(img => img !== null);
   
-  // Provide UX feedback for PDF upload in chat
-  const messageText = currentPdfText && !text ? `Uploaded PDF: ${currentPdfName}` : text;
-  appendUserMessage(messageText, currentImage);
+  // Provide UX feedback for document upload in chat
+  let uiMessageText = text;
+  if (currentDocs.length > 0) {
+    const docNames = currentDocs.map(d => d.name).join(', ');
+    if (uiMessageText) {
+      uiMessageText += `\n\n*(Attached: ${docNames})*`;
+    } else {
+      uiMessageText = `Uploaded Documents: ${docNames}`;
+    }
+  }
+  appendUserMessage(uiMessageText, currentImages.length > 0 ? currentImages[0] : null);
 
   // Clear input and previews
   chatInput.value = '';
   chatInput.style.height = 'auto';
-  selectedImage = null;
-  selectedPdfText = null;
-  selectedPdfName = null;
+  selectedImages = [];
+  selectedDocuments = [];
   imagePreviewContainer.innerHTML = '';
   imagePreviewContainer.classList.add('hidden');
   imageUpload.value = '';
@@ -308,22 +404,78 @@ async function handleSend() {
           let text = '';
           const article = document.querySelector('article');
           const main = document.querySelector('main') || document.querySelector('[role="main"]');
+          const root = article || main || document.body;
 
           // Smart Cascading Fallback
-          if (article) { text = article.innerText; }
-          else if (main) { text = main.innerText; }
-          else { text = document.body.innerText; }
+          text = root.innerText;
+
+          // Extract sections by headings
+          const sections = [];
+          const headings = root.querySelectorAll('h1, h2, h3, h4, h5, h6');
+          headings.forEach((h, i) => {
+            let content = '';
+            let sibling = h.nextElementSibling;
+            while (sibling && !sibling.matches('h1, h2, h3, h4, h5, h6')) {
+              content += sibling.innerText + '\n';
+              sibling = sibling.nextElementSibling;
+            }
+            if (content.trim()) {
+              sections.push({
+                id: i + 1,
+                title: h.innerText.trim().substring(0, 120),
+                content: content.trim().substring(0, 800)
+              });
+            }
+          });
+
+          // If no headings, chunk by paragraphs
+          if (sections.length === 0) {
+            const paragraphs = root.querySelectorAll('p');
+            let chunk = '';
+            let chunkIndex = 1;
+            paragraphs.forEach((p) => {
+              chunk += p.innerText + '\n';
+              if (chunk.length > 300) {
+                sections.push({
+                  id: chunkIndex,
+                  title: chunk.substring(0, 60).trim() + '…',
+                  content: chunk.trim().substring(0, 800)
+                });
+                chunk = '';
+                chunkIndex++;
+              }
+            });
+            if (chunk.trim()) {
+              sections.push({
+                id: chunkIndex,
+                title: chunk.substring(0, 60).trim() + '…',
+                content: chunk.trim().substring(0, 800)
+              });
+            }
+          }
 
           return {
             title: document.title,
-            text: text.substring(0, 15000)
+            text: text.substring(0, 15000),
+            sections: sections.slice(0, 30)
           };
         }
       });
 
       if (injectionResults && injectionResults[0] && injectionResults[0].result) {
         const result = injectionResults[0].result;
-        pageContext = `[Context of active page: ${result.title}]\n\n${result.text}`;
+        pageSections = result.sections || [];
+        
+        // Build section list for the AI
+        let sectionList = '';
+        if (pageSections.length > 0) {
+          sectionList = '\n\nPAGE SECTIONS (use [[ref:ID]] to reference):\n';
+          pageSections.forEach(s => {
+            sectionList += `[Section ${s.id}] "${s.title}"\n`;
+          });
+        }
+        
+        pageContext = `[Context of active page: ${result.title}]${sectionList}\n\n${result.text}`;
       }
     }
   } catch (err) {
@@ -331,13 +483,15 @@ async function handleSend() {
     pageContext = "Error extracting context. Assume general conversation.";
   }
 
-  // Capture screenshot of the active tab
+  // Capture screenshot of the active tab (skip when PDF is attached — not relevant)
   let screenshotUrl = null;
-  try {
-    const res = await chrome.runtime.sendMessage({ action: 'captureScreen' });
-    if (res && res.screenshot) screenshotUrl = res.screenshot;
-  } catch (err) {
-    console.log('Could not capture screenshot:', err);
+  if (currentDocs.length === 0) {
+    try {
+      const res = await chrome.runtime.sendMessage({ action: 'captureScreen' });
+      if (res && res.screenshot) screenshotUrl = res.screenshot;
+    } catch (err) {
+      console.log('Could not capture screenshot:', err);
+    }
   }
 
   // Show thinking
@@ -345,12 +499,14 @@ async function handleSend() {
   chatContainer.appendChild(thinkingEl);
   scrollToBottom();
 
-  let finalMessageToAI = messageText;
-  if (currentPdfText) {
-    finalMessageToAI += `\n\n[Attached Document: ${currentPdfName}]\n<pdf_content>\n${currentPdfText}\n</pdf_content>`;
+  let finalMessageToAI = uiMessageText;
+  if (currentDocs.length > 0) {
+    for (const doc of currentDocs) {
+      finalMessageToAI += `\n\n<document_content name="${doc.name}">\n${doc.content}\n</document_content>`;
+    }
   }
 
-  await processLLMResponse(finalMessageToAI, pageContext, thinkingEl, currentImage, screenshotUrl, deepThinkActive);
+  await processLLMResponse(finalMessageToAI, pageContext, thinkingEl, currentImages, screenshotUrl, deepThinkActive);
 }
 
 function appendUserMessage(text, imageUrl, saveToHistory = true) {
@@ -479,23 +635,27 @@ async function callLLM(apiConfig, messages, signal) {
   return data.choices[0].message.content.trim();
 }
 
-async function processLLMResponse(userMessage, contextData, thinkingEl, imageUrl, screenshotUrl, isDeepThink) {
+async function processLLMResponse(userMessage, contextData, thinkingEl, images, screenshotUrl, isDeepThink) {
   const apiConfig = await getApiConfig();
   if (!apiConfig) {
     thinkingEl.textContent = 'Error: Please configure AI provider and API key in settings.';
     return;
   }
 
-  // Prepare user content (text and potentially image)
+  // Prepare user content (text and potentially images)
   const userContent = [];
   if (userMessage) {
     userContent.push({ type: 'text', text: userMessage });
   }
-  if (imageUrl) {
-    userContent.push({
-      type: 'image_url',
-      image_url: { url: imageUrl }
-    });
+  if (Array.isArray(images)) {
+    for (const imgUrl of images) {
+      if (imgUrl) {
+        userContent.push({
+          type: 'image_url',
+          image_url: { url: imgUrl }
+        });
+      }
+    }
   }
   if (screenshotUrl) {
     userContent.push({
@@ -559,7 +719,8 @@ CRITICAL INSTRUCTIONS:
 
 3. Inside <answer>, write your final response informed by all 12 answers above.
 4. PROVE YOU ARE WATCHING: If the page is relevant, mention a specific detail from the page (like the title, a name, or a fact).
-5. BE KIND & ELEGANT: Use Markdown (###, **, -) to make the answer beautiful. NO EMOJIS ALLOWED.`
+5. PAGE REFERENCES: When you reference or quote a specific section from the page, use [[ref:ID]] where ID is the section number from the PAGE SECTIONS list. Example: "As mentioned in [[ref:3]], the algorithm uses..." — this creates a clickable reference for the user. Only use valid section IDs from the list provided. Do not fabricate IDs.
+6. BE KIND & ELEGANT: Use Markdown (###, **, -) to make the answer beautiful. NO EMOJIS ALLOWED.`
     : `You are Alvelika, a dedicated educational AI assistant designed to help students deeply understand documents and web pages.
 You are "watching" the screen with the student. You receive both the page's text AND a screenshot of what they currently see.
 You are part of a persistent chat session. The user may switch between normal chat and "Agent mode" (where you autonomously perform browser actions). The conversation history below contains ALL messages — including agent task requests, agent results, and agent interruptions. Use this history to understand what has happened so far.
@@ -574,7 +735,8 @@ CRITICAL INSTRUCTIONS:
 2. Respond directly to the user. Do NOT use any XML tags like <thought> or <answer>. Just write the response.
 3. PROVE YOU ARE WATCHING: When relevant, explicitly mention specific details, terms, or phrases from the page context to anchor your explanations in what the student is actively looking at.
 4. BE KIND, ENCOURAGING & ELEGANT: Use a supportive, teacher-like tone. Use Markdown (###, **, -) to make the answer beautiful and easy to read. YOU MUST NOT USE ANY EMOJIS (NO SMILEYS, NO ICONS) UNDER ANY CIRCUMSTANCES.
-5. If the conversation history contains agent results, you are aware of what happened and can reference those results naturally.`;
+5. PAGE REFERENCES: When you reference or quote a specific section from the page, use [[ref:ID]] where ID is the section number from the PAGE SECTIONS list. Example: "As explained in [[ref:2]], this concept..." — this creates a clickable reference for the user. Only use valid section IDs from the list provided. Do not fabricate IDs.
+6. If the conversation history contains agent results, you are aware of what happened and can reference those results naturally.`;
 
   // Push user message into conversation history
   conversationHistory.push({ role: 'user', content: userContent });
@@ -1387,6 +1549,8 @@ function streamText(fullText, container, signal) {
     } else {
       container.textContent = fullText;
     }
+
+    processPageReferences(container);
 
     requestAnimationFrame(() => {
       container.style.transition = 'opacity 0.4s ease, transform 0.4s ease';
