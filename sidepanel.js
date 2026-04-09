@@ -611,16 +611,16 @@ CRITICAL INSTRUCTIONS:
       await delay(600);
       await fadeOutAndRemove(thinkingEl, 400);
 
-      if (thinkingText) {
+      if (thinkingText && thinkingText.length > 0) {
         const thinkingDiv = document.createElement('div');
         thinkingDiv.className = 'message ai agent-thinking';
         const thinkingHeader = document.createElement('div');
         thinkingHeader.className = 'agent-thinking-header';
-        thinkingHeader.innerHTML = `<span class="agent-thinking-icon">🧠</span> <span>Deep Thinking</span> <span class="agent-thinking-toggle">▼</span>`;
+        thinkingHeader.innerHTML = `<span class="agent-thinking-icon">🧠</span> <span>Deep Thinking</span> <span class="agent-thinking-toggle">▶</span>`;
         thinkingDiv.appendChild(thinkingHeader);
 
         const thinkingBody = document.createElement('div');
-        thinkingBody.className = 'agent-thinking-body';
+        thinkingBody.className = 'agent-thinking-body collapsed';
         if (typeof marked !== 'undefined') {
           thinkingBody.innerHTML = marked.parse(thinkingText);
         } else {
@@ -636,6 +636,11 @@ CRITICAL INSTRUCTIONS:
 
         chatContainer.appendChild(thinkingDiv);
         scrollToBottom();
+      }
+
+      // If no answer was parsed, use the full raw result (model didn't use tags)
+      if (!finalAnswer) {
+        finalAnswer = rawResult;
       }
 
       const answerDiv = document.createElement('div');
@@ -1374,31 +1379,21 @@ function streamText(fullText, container, signal) {
       return;
     }
 
-    let i = 0;
-    let currentText = '';
+    container.style.opacity = '0';
+    container.style.transform = 'translateY(8px)';
 
-    const interval = setInterval(() => {
-      if (signal && signal.aborted) {
-        clearInterval(interval);
-        resolve();
-        return;
-      }
+    if (typeof marked !== 'undefined') {
+      container.innerHTML = marked.parse(fullText);
+    } else {
+      container.textContent = fullText;
+    }
 
-      currentText += fullText.charAt(i);
-
-      if (typeof marked !== 'undefined') {
-        container.innerHTML = marked.parse(currentText);
-      } else {
-        container.textContent = currentText;
-      }
-
-      i++;
-      scrollToBottom();
-
-      if (i >= fullText.length) {
-        clearInterval(interval);
-        resolve();
-      }
-    }, 10);
+    requestAnimationFrame(() => {
+      container.style.transition = 'opacity 0.4s ease, transform 0.4s ease';
+      container.style.opacity = '1';
+      container.style.transform = 'translateY(0)';
+      container.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      setTimeout(resolve, 400);
+    });
   });
 }
