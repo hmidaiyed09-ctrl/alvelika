@@ -36,8 +36,8 @@ function processPageReferences(container) {
   const html = container.innerHTML;
   if (!html.includes('[[ref:')) return;
 
-  container.innerHTML = html.replace(/\[\[ref:(\d+)\]\]/g, (match, id) => {
-    const section = pageSections.find(s => s.id === parseInt(id));
+  const replacedHtml = html.replace(/\[\[ref:([\w-]+)\]\]/g, (match, id) => {
+    const section = globalReferences.find(s => s.id === id);
     if (!section) return match;
     const title = section.title.replace(/"/g, '&quot;').replace(/</g, '&lt;');
     return `<button class="page-ref-chip" data-ref-id="${id}" title="View referenced section">
@@ -45,10 +45,60 @@ function processPageReferences(container) {
       ${title.substring(0, 40)}${title.length > 40 ? '…' : ''}
     </button>`;
   });
+
+  container.innerHTML = replacedHtml.replace(/\[\[crop:\s*([\w-]+)\s*:\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\]\]/g, (match, scrId, ymin, xmin, ymax, xmax) => {
+    return `<button class="page-ref-chip crop-ref-chip" data-scr-id="${scrId}" data-rect="${ymin},${xmin},${ymax},${xmax}" title="View visual crop">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h18v18H3zM8 3v18M16 3v18M3 8h18M3 16h18"/></svg>
+      View visual clip
+    </button>`;
+  });
 }
 
 // ─── Page reference popup handler ───
 document.addEventListener('click', (e) => {
+  const cropChip = e.target.closest('.crop-ref-chip');
+  if (cropChip) {
+    const existingPopup = document.querySelector('.page-ref-popup');
+    if (existingPopup) existingPopup.remove();
+
+    const scrId = cropChip.dataset.scrId;
+    const [ymin, xmin, ymax, xmax] = cropChip.dataset.rect.split(',').map(Number);
+    
+    const scrRef = globalReferences.find(r => r.id === scrId);
+    if (!scrRef || !scrRef.url) return;
+
+    const popup = document.createElement('div');
+    popup.className = 'page-ref-popup';
+    popup.innerHTML = `
+      <div class="page-ref-popup-header">
+        <span class="page-ref-popup-title">Visual Highlight</span>
+        <button class="page-ref-popup-close">&times;</button>
+      </div>
+      <div class="page-ref-popup-body" style="padding:0; text-align:center; background:#000;">
+        <canvas id="crop-canvas-${scrId}" style="max-width:100%; border-radius: 0 0 16px 16px;"></canvas>
+      </div>
+    `;
+
+    cropChip.closest('.message').appendChild(popup);
+    popup.querySelector('.page-ref-popup-close').addEventListener('click', () => popup.remove());
+
+    const img = new Image();
+    img.onload = () => {
+      const cvs = document.getElementById(`crop-canvas-${scrId}`);
+      if (!cvs) return;
+      const ctx = cvs.getContext('2d');
+      const sw = Math.floor(((xmax - xmin) / 1000) * img.width);
+      const sh = Math.floor(((ymax - ymin) / 1000) * img.height);
+      const sx = Math.floor((xmin / 1000) * img.width);
+      const sy = Math.floor((ymin / 1000) * img.height);
+      
+      cvs.width = sw;
+      cvs.height = sh;
+      ctx.drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
+    };
+    img.src = scrRef.url;
+    return;
+  }
   const chip = e.target.closest('.page-ref-chip');
 
   // Close any existing popup if clicking elsewhere
@@ -63,8 +113,8 @@ document.addEventListener('click', (e) => {
   // Remove existing popup
   if (existingPopup) existingPopup.remove();
 
-  const refId = parseInt(chip.dataset.refId);
-  const section = pageSections.find(s => s.id === refId);
+  const refId = chip.dataset.refId;
+  const section = globalReferences.find(s => s.id === refId);
   if (!section) return;
 
   const popup = document.createElement('div');
@@ -105,11 +155,12 @@ let selectedDocuments = []; // Array of { name, content }
 let conversationHistory = [];
 let agentModeActive = false;
 let deepThinkActive = false;
-let pageSections = []; // Stores extracted page sections for references
+let globalReferences = []; // Persistent references across turns
 
 // ─── Initialize Chat State ───
 document.addEventListener('DOMContentLoaded', async () => {
-  const data = await chrome.storage.local.get(['conversationHistory']);
+  const data = await chrome.storage.local.get(['conversationHistory', 'globalReferences']);
+  if (data.globalReferences) globalReferences = data.globalReferences;
   if (data.conversationHistory && Array.isArray(data.conversationHistory) && data.conversationHistory.length > 0) {
     conversationHistory = data.conversationHistory;
     
@@ -228,7 +279,8 @@ settingsButton.addEventListener('click', () => {
 clearButton.addEventListener('click', () => {
   chatContainer.innerHTML = '';
   conversationHistory = [];
-  chrome.storage.local.remove(['conversationHistory']);
+  globalReferences = [];
+  chrome.storage.local.remove(['conversationHistory', 'globalReferences']);
   const welcome = document.createElement('div');
   welcome.className = 'welcome';
   welcome.innerHTML = `
@@ -464,15 +516,18 @@ async function handleSend() {
 
       if (injectionResults && injectionResults[0] && injectionResults[0].result) {
         const result = injectionResults[0].result;
-        pageSections = result.sections || [];
+        const sections = result.sections || [];
         
-        // Build section list for the AI
         let sectionList = '';
-        if (pageSections.length > 0) {
+        if (sections.length > 0) {
+          const sessionPrefix = Math.random().toString(36).substring(2, 6);
           sectionList = '\n\nPAGE SECTIONS (use [[ref:ID]] to reference):\n';
-          pageSections.forEach(s => {
-            sectionList += `[Section ${s.id}] "${s.title}"\n`;
+          sections.forEach(s => {
+            const refId = `web-${sessionPrefix}-${s.id}`;
+            sectionList += `[Section ${refId}] "${s.title}"\n`;
+            globalReferences.push({ id: refId, title: s.title, content: s.content });
           });
+          chrome.storage.local.set({ globalReferences });
         }
         
         pageContext = `[Context of active page: ${result.title}]${sectionList}\n\n${result.text}`;
@@ -485,10 +540,16 @@ async function handleSend() {
 
   // Capture screenshot of the active tab (skip when PDF is attached — not relevant)
   let screenshotUrl = null;
+  let screenshotRefId = null;
   if (currentDocs.length === 0) {
     try {
       const res = await chrome.runtime.sendMessage({ action: 'captureScreen' });
-      if (res && res.screenshot) screenshotUrl = res.screenshot;
+      if (res && res.screenshot) {
+        screenshotUrl = res.screenshot;
+        screenshotRefId = `scr-${Math.random().toString(36).substring(2, 6)}`;
+        globalReferences.push({ id: screenshotRefId, type: 'screenshot', url: screenshotUrl });
+        chrome.storage.local.set({ globalReferences });
+      }
     } catch (err) {
       console.log('Could not capture screenshot:', err);
     }
@@ -501,12 +562,44 @@ async function handleSend() {
 
   let finalMessageToAI = uiMessageText;
   if (currentDocs.length > 0) {
+    const sessionPrefix = Math.random().toString(36).substring(2, 6);
+    let docRefIdx = 1;
+    let docRefList = '\n\nDOCUMENT SECTIONS (use [[ref:ID]] to reference them if helpful):\n';
+    let hasDocRefs = false;
+    
     for (const doc of currentDocs) {
+      const pageRegex = /\[Page (\d+)\]\n([\s\S]*?)(?=(?:\[Page \d+\]|$))/g;
+      let match;
+      let docHasPages = false;
+      while ((match = pageRegex.exec(doc.content)) !== null) {
+        docHasPages = true;
+        const pNum = match[1];
+        const pText = match[2].trim();
+        if (pText.length > 0) {
+          const refId = `doc-${sessionPrefix}-${docRefIdx++}`;
+          docRefList += `[Section ${refId}] "${doc.name} - Page ${pNum}"\n`;
+          globalReferences.push({ id: refId, title: `${doc.name} (Page ${pNum})`, content: pText });
+          hasDocRefs = true;
+        }
+      }
+      
+      if (!docHasPages && doc.content.length > 0) {
+        const refId = `doc-${sessionPrefix}-${docRefIdx++}`;
+        docRefList += `[Section ${refId}] "${doc.name}"\n`;
+        globalReferences.push({ id: refId, title: doc.name, content: doc.content.substring(0, 5000) });
+        hasDocRefs = true;
+      }
+      
       finalMessageToAI += `\n\n<document_content name="${doc.name}">\n${doc.content}\n</document_content>`;
+    }
+    
+    if (hasDocRefs) {
+      finalMessageToAI += docRefList;
+      chrome.storage.local.set({ globalReferences });
     }
   }
 
-  await processLLMResponse(finalMessageToAI, pageContext, thinkingEl, currentImages, screenshotUrl, deepThinkActive);
+  await processLLMResponse(finalMessageToAI, pageContext, thinkingEl, currentImages, screenshotUrl, deepThinkActive, screenshotRefId);
 }
 
 function appendUserMessage(text, imageUrl, saveToHistory = true) {
@@ -635,7 +728,7 @@ async function callLLM(apiConfig, messages, signal) {
   return data.choices[0].message.content.trim();
 }
 
-async function processLLMResponse(userMessage, contextData, thinkingEl, images, screenshotUrl, isDeepThink) {
+async function processLLMResponse(userMessage, contextData, thinkingEl, images, screenshotUrl, isDeepThink, screenshotRefId = null) {
   const apiConfig = await getApiConfig();
   if (!apiConfig) {
     thinkingEl.textContent = 'Error: Please configure AI provider and API key in settings.';
@@ -663,6 +756,10 @@ async function processLLMResponse(userMessage, contextData, thinkingEl, images, 
       image_url: { url: screenshotUrl, detail: 'low' }
     });
   }
+
+  const cropInstruction = screenshotRefId 
+    ? `\n7. VISUAL CROPS: To point out a specific visual detail in the screenshot, use [[crop:${screenshotRefId}:ymin,xmin,ymax,xmax]] where coordinates are 0-1000 percentages. Example: "Look at the icon [[crop:${screenshotRefId}:200,100,250,150]]".` 
+    : '';
 
   const systemPrompt = deepThinkActive
     ? `You are Alvelika, a sophisticated and proactive AI research assistant. 
@@ -720,7 +817,7 @@ CRITICAL INSTRUCTIONS:
 3. Inside <answer>, write your final response informed by all 12 answers above.
 4. PROVE YOU ARE WATCHING: If the page is relevant, mention a specific detail from the page (like the title, a name, or a fact).
 5. PAGE REFERENCES: When you reference or quote a specific section from the page, use [[ref:ID]] where ID is the section number from the PAGE SECTIONS list. Example: "As mentioned in [[ref:3]], the algorithm uses..." — this creates a clickable reference for the user. Only use valid section IDs from the list provided. Do not fabricate IDs.
-6. BE KIND & ELEGANT: Use Markdown (###, **, -) to make the answer beautiful. NO EMOJIS ALLOWED.`
+6. BE KIND & ELEGANT: Use Markdown (###, **, -) to make the answer beautiful. NO EMOJIS ALLOWED.${cropInstruction}`
     : `You are Alvelika, a dedicated educational AI assistant designed to help students deeply understand documents and web pages.
 You are "watching" the screen with the student. You receive both the page's text AND a screenshot of what they currently see.
 You are part of a persistent chat session. The user may switch between normal chat and "Agent mode" (where you autonomously perform browser actions). The conversation history below contains ALL messages — including agent task requests, agent results, and agent interruptions. Use this history to understand what has happened so far.
@@ -736,7 +833,7 @@ CRITICAL INSTRUCTIONS:
 3. PROVE YOU ARE WATCHING: When relevant, explicitly mention specific details, terms, or phrases from the page context to anchor your explanations in what the student is actively looking at.
 4. BE KIND, ENCOURAGING & ELEGANT: Use a supportive, teacher-like tone. Use Markdown (###, **, -) to make the answer beautiful and easy to read. YOU MUST NOT USE ANY EMOJIS (NO SMILEYS, NO ICONS) UNDER ANY CIRCUMSTANCES.
 5. PAGE REFERENCES: When you reference or quote a specific section from the page, use [[ref:ID]] where ID is the section number from the PAGE SECTIONS list. Example: "As explained in [[ref:2]], this concept..." — this creates a clickable reference for the user. Only use valid section IDs from the list provided. Do not fabricate IDs.
-6. If the conversation history contains agent results, you are aware of what happened and can reference those results naturally.`;
+6. If the conversation history contains agent results, you are aware of what happened and can reference those results naturally.${cropInstruction}`;
 
   // Push user message into conversation history
   conversationHistory.push({ role: 'user', content: userContent });
@@ -1074,10 +1171,11 @@ RULES:
 4. Respond with PURE JSON only. No wrapping, no code fences, no extra text.`;
 }
 
-function buildAgentSystemPrompt(userGoal, previousValidateOption) {
-  const historyBlock = previousValidateOption
-    ? `\n\nPREVIOUS STEPS LOG:\n${previousValidateOption}`
-    : '\n\nThis is the FIRST step. No previous commands have been executed.';
+function buildAgentSystemPrompt(userGoal, executionHistoryLog, executionFeedbackBlock) {
+  const historyBlock = executionHistoryLog
+    ? `\n\nREAL STEP HISTORY:\n${executionHistoryLog}`
+    : '\n\nREAL STEP HISTORY:\nThis is the FIRST step. No previous commands have been executed.';
+  const feedbackBlock = executionFeedbackBlock ? `\n\n${executionFeedbackBlock}` : '';
 
   return `You are Alvelika Agent — an autonomous AI that ACTS on web pages. Your job is to COMPLETE the user's goal efficiently, not to explain or analyze endlessly.
 
@@ -1087,7 +1185,7 @@ You receive these inputs every step:
 - PAGE TEXT: The visible text content of the page.
 
 USER GOAL: "${userGoal}"
-${historyBlock}
+${historyBlock}${feedbackBlock}
 
 ═══ DECISION POLICY (follow strictly) ═══
 
@@ -1096,7 +1194,17 @@ ${historyBlock}
 3. IF there are ads/sponsored items → SKIP them. Click the first REAL result.
 4. NEVER scroll more than 2 times for the same sub-goal. After 2 scrolls, you MUST attempt a click with the best available selector.
 5. The "type" command auto-focuses the element. Do NOT click an input before typing — just use "type" directly.
-6. Act IMMEDIATELY when confidence is high and risk is low. Analysis is support, not the goal.
+6. READ the real browser feedback carefully before choosing the next action. Use exact errors to self-correct.
+7. Act IMMEDIATELY when confidence is high and risk is low. Analysis is support, not the goal.
+
+═══ SELF-CORRECTION / RETRY RULES ═══
+
+- The REAL EXECUTION FEEDBACK block contains the browser's exact result from the last action. Treat it as ground truth.
+- If the last action failed because of invalid selector syntax, write a NEW valid selector. Common causes are missing closing quotes or a missing closing ] in an attribute selector.
+- NEVER repeat the exact same selector after an invalid selector failure.
+- After 3 failed attempts for the same exact action, that action is blocked.
+- If an action is listed in BLOCKED ACTIONS, do not repeat it. You MUST choose a different selector or a different action.
+- After repeated failures, prefer a different selector strategy: use another selector from the ✅ SELECTOR list, a broader parent container, a safer aria-label selector, or a different command.
 
 ═══ FIRST QUESTION (answer BEFORE deciding any action) ═══
 
@@ -1205,14 +1313,42 @@ async function executeAgentCommand(instruct) {
       const results = await chrome.scripting.executeScript({
         target: { tabId: tab.id },
         func: (selector) => {
-          let el = document.querySelector(selector);
+          const safeQuery = (candidate) => {
+            try {
+              return { element: document.querySelector(candidate), error: null };
+            } catch (err) {
+              return {
+                element: null,
+                error: err instanceof Error ? err.message : String(err)
+              };
+            }
+          };
+
+          let query = safeQuery(selector);
+          if (query.error) {
+            return {
+              success: false,
+              errorType: 'invalid_selector_syntax',
+              error: query.error
+            };
+          }
+
+          let el = query.element;
 
           // Fallback 1: if selector has exact href=, try contains match
           if (!el && selector.includes('href="') && !selector.includes('href*=')) {
             const hrefMatch = selector.match(/href="([^"]+)"/);
             if (hrefMatch) {
               const href = hrefMatch[1].split('&pp=')[0].split('&feature=')[0].split('&si=')[0];
-              el = document.querySelector(`a[href*="${href}"]`);
+              query = safeQuery(`a[href*="${href}"]`);
+              if (query.error) {
+                return {
+                  success: false,
+                  errorType: 'invalid_selector_syntax',
+                  error: query.error
+                };
+              }
+              el = query.element;
             }
           }
 
@@ -1223,12 +1359,20 @@ async function executeAgentCommand(instruct) {
               const parts = hrefMatch[1].split('?');
               if (parts.length > 1) {
                 const pathAndKey = parts[0] + '?' + parts[1].split('&')[0];
-                el = document.querySelector(`a[href*="${pathAndKey}"]`);
+                query = safeQuery(`a[href*="${pathAndKey}"]`);
+                if (query.error) {
+                  return {
+                    success: false,
+                    errorType: 'invalid_selector_syntax',
+                    error: query.error
+                  };
+                }
+                el = query.element;
               }
             }
           }
 
-          if (!el) return { success: false, error: `Element not found: ${selector}` };
+          if (!el) return { success: false, errorType: 'element_not_found', error: `Element not found: ${selector}` };
           el.click();
           return { success: true, description: `Clicked: ${selector}` };
         },
@@ -1247,8 +1391,17 @@ async function executeAgentCommand(instruct) {
       const results = await chrome.scripting.executeScript({
         target: { tabId: tab.id },
         func: (selector, value) => {
-          const el = document.querySelector(selector);
-          if (!el) return { success: false, error: `Element not found: ${selector}` };
+          let el = null;
+          try {
+            el = document.querySelector(selector);
+          } catch (err) {
+            return {
+              success: false,
+              errorType: 'invalid_selector_syntax',
+              error: err instanceof Error ? err.message : String(err)
+            };
+          }
+          if (!el) return { success: false, errorType: 'element_not_found', error: `Element not found: ${selector}` };
           el.focus();
           el.value = value;
           el.dispatchEvent(new Event('input', { bubbles: true }));
@@ -1289,6 +1442,98 @@ async function executeAgentCommand(instruct) {
 let agentRunning = false;
 let currentAbortController = null;
 const AGENT_MAX_STEPS = 15;
+const AGENT_MAX_ACTION_RETRIES = 3;
+
+function normalizeAgentValue(value) {
+  return String(value ?? '').trim().replace(/\s+/g, ' ');
+}
+
+function formatAgentCommand(instruct = {}) {
+  const parts = [`type=${instruct.type || 'unknown'}`];
+  if (instruct.selector) parts.push(`selector=${instruct.selector}`);
+  if (instruct.url) parts.push(`url=${instruct.url}`);
+  if (typeof instruct.value !== 'undefined' && instruct.value !== '') parts.push(`value=${instruct.value}`);
+  return parts.join(' | ');
+}
+
+function getAgentActionSignature(instruct = {}) {
+  const type = normalizeAgentValue(instruct.type).toLowerCase();
+  if (!type) return 'unknown';
+
+  if (type === 'click' || type === 'type') {
+    return `${type}:${normalizeAgentValue(instruct.selector)}`;
+  }
+  if (type === 'navigate') {
+    return `${type}:${normalizeAgentValue(instruct.url)}`;
+  }
+  if (type === 'scroll') {
+    return `${type}:${normalizeAgentValue(instruct.value).toLowerCase()}`;
+  }
+  if (type === 'wait') return 'wait';
+  if (type === 'done') return `done:${normalizeAgentValue(instruct.description)}`;
+  return `${type}:${normalizeAgentValue(JSON.stringify(instruct))}`;
+}
+
+function isRetryTrackedAgentAction(instruct = {}) {
+  return ['click', 'type', 'navigate', 'scroll'].includes(normalizeAgentValue(instruct.type).toLowerCase());
+}
+
+function detectSelectorRepairHint(selector = '') {
+  const hints = [];
+  const singleQuotes = (selector.match(/'/g) || []).length;
+  const doubleQuotes = (selector.match(/"/g) || []).length;
+  const openBrackets = (selector.match(/\[/g) || []).length;
+  const closeBrackets = (selector.match(/\]/g) || []).length;
+
+  if (singleQuotes % 2 !== 0 || doubleQuotes % 2 !== 0) {
+    hints.push('The selector likely has an unmatched quote.');
+  }
+  if (openBrackets !== closeBrackets) {
+    hints.push('The selector likely has a missing closing bracket.');
+  }
+
+  return hints.join(' ');
+}
+
+function buildExecutionFeedbackBlock(lastExecutionFeedback, blockedActions) {
+  const blockedBlock = blockedActions.length
+    ? blockedActions.map((entry, index) => `${index + 1}. ${entry}`).join('\n')
+    : 'None.';
+
+  return [
+    'REAL EXECUTION FEEDBACK (from the browser, not from you):',
+    lastExecutionFeedback || 'No previous command has been executed yet.',
+    '',
+    'BLOCKED ACTIONS:',
+    blockedBlock
+  ].join('\n');
+}
+
+function buildExecutionLogEntry(stepCount, instruct, result, meta = {}) {
+  const lines = [
+    `Step ${stepCount}: ${formatAgentCommand(instruct)}`,
+    `${result.success ? '✓ SUCCESS' : '✗ FAILURE'}: ${result.description || result.error || 'No details provided.'}`
+  ];
+
+  if (meta.failureCount) {
+    lines.push(`Failure count for this exact action: ${meta.failureCount}/${AGENT_MAX_ACTION_RETRIES}`);
+  }
+  if (!result.success && result.error) {
+    lines.push(`Exact browser error: ${result.error}`);
+  }
+  if (!result.success && result.errorType === 'invalid_selector_syntax') {
+    const hint = detectSelectorRepairHint(instruct.selector);
+    if (hint) {
+      lines.push(`Selector repair hint: ${hint}`);
+    }
+    lines.push('Self-correction: The last selector was invalid CSS. Write a NEW valid selector instead of repeating it.');
+  }
+  if (meta.blockedReason) {
+    lines.push(`Retry guard: ${meta.blockedReason}`);
+  }
+
+  return lines.join('\n');
+}
 
 function showAgentRunningUI() {
   sendButton.classList.add('hidden');
@@ -1397,7 +1642,10 @@ async function handleAgentSend(userGoal) {
   if (!agentRunning) { hideAgentRunningUI(); return; }
 
   // ═══ AGENT LOOP ═══
-  let previousValidateOption = null;
+  let executionHistoryLog = null;
+  let lastExecutionFeedback = 'No previous command has been executed yet.';
+  const actionFailureCounts = new Map();
+  const blockedActions = new Map();
   let stepCount = 0;
 
   while (agentRunning && stepCount < AGENT_MAX_STEPS) {
@@ -1413,7 +1661,11 @@ async function handleAgentSend(userGoal) {
     const page = await scrapePageForAgent();
 
     // ── 2. Build messages ──
-    const systemPrompt = buildAgentSystemPrompt(refinedGoal, previousValidateOption);
+    const executionFeedbackBlock = buildExecutionFeedbackBlock(
+      lastExecutionFeedback,
+      Array.from(blockedActions.values())
+    );
+    const systemPrompt = buildAgentSystemPrompt(refinedGoal, executionHistoryLog, executionFeedbackBlock);
     const userContent = [
       { type: 'text', text: `Current page title: ${page.pageTitle}\nCurrent page URL: ${page.pageUrl}\n\nINTERACTIVE ELEMENTS:\n${page.elements}\n\nPAGE TEXT:\n${page.pageText}` }
     ];
@@ -1496,10 +1748,7 @@ async function handleAgentSend(userGoal) {
     chatContainer.appendChild(cmdDiv);
     scrollToBottom();
 
-    // ── 7. Update validateOption for next loop ──
-    previousValidateOption = parsed.validateOption || previousValidateOption;
-
-    // ── 8. Check if done ──
+    // ── 7. Check if done ──
     if (instruct.type === 'done') {
       const doneText = instruct.description || 'Goal completed.';
       appendAIMessage(doneText, { stream: true });
@@ -1510,8 +1759,51 @@ async function handleAgentSend(userGoal) {
       break;
     }
 
-    // ── 9. Execute the command ──
-    const result = await executeAgentCommand(instruct);
+    // ── 8. Execute the command with retry guards ──
+    const actionSignature = getAgentActionSignature(instruct);
+    const priorFailureCount = isRetryTrackedAgentAction(instruct)
+      ? (actionFailureCounts.get(actionSignature) || 0)
+      : 0;
+
+    let blockedReason = blockedActions.get(actionSignature) || null;
+    let result;
+
+    if (isRetryTrackedAgentAction(instruct) && priorFailureCount >= AGENT_MAX_ACTION_RETRIES) {
+      blockedReason = blockedReason || `${formatAgentCommand(instruct)} is blocked after ${AGENT_MAX_ACTION_RETRIES} failed attempts. Choose a different selector or approach.`;
+      blockedActions.set(actionSignature, blockedReason);
+      result = {
+        success: false,
+        errorType: 'retry_limit_reached',
+        error: blockedReason
+      };
+    } else {
+      result = await executeAgentCommand(instruct);
+    }
+
+    let failureCount = 0;
+    if (isRetryTrackedAgentAction(instruct)) {
+      if (result.success) {
+        actionFailureCounts.delete(actionSignature);
+      } else if (result.errorType === 'retry_limit_reached') {
+        failureCount = priorFailureCount;
+      } else {
+        failureCount = priorFailureCount + 1;
+        actionFailureCounts.set(actionSignature, failureCount);
+        if (failureCount >= AGENT_MAX_ACTION_RETRIES) {
+          blockedReason = `${formatAgentCommand(instruct)} is blocked after ${AGENT_MAX_ACTION_RETRIES} failed attempts. Last error: ${result.error || 'Unknown error.'}`;
+          blockedActions.set(actionSignature, blockedReason);
+        }
+      }
+    }
+
+    const executionLogEntry = buildExecutionLogEntry(stepCount, instruct, result, {
+      failureCount,
+      blockedReason
+    });
+    executionHistoryLog = executionHistoryLog
+      ? `${executionHistoryLog}\n\n${executionLogEntry}`
+      : executionLogEntry;
+    lastExecutionFeedback = executionLogEntry;
 
     if (!result.success) {
       cmdDiv.innerHTML += ` <span style="color:#ff6b6b;">✗ ${result.error}</span>`;
