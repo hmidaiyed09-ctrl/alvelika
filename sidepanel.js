@@ -31,106 +31,7 @@ document.addEventListener('click', (e) => {
   }
 });
 
-// ─── Page reference chips — convert [[ref:N]] to clickable elements ───
-function processPageReferences(container) {
-  const html = container.innerHTML;
-  if (!html.includes('[[ref:')) return;
 
-  const replacedHtml = html.replace(/\[\[ref:([\w-]+)\]\]/g, (match, id) => {
-    const section = globalReferences.find(s => s.id === id);
-    if (!section) return match;
-    const title = section.title.replace(/"/g, '&quot;').replace(/</g, '&lt;');
-    return `<button class="page-ref-chip" data-ref-id="${id}" title="View referenced section">
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-      ${title.substring(0, 40)}${title.length > 40 ? '…' : ''}
-    </button>`;
-  });
-
-  container.innerHTML = replacedHtml.replace(/\[\[crop:\s*([\w-]+)\s*:\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\]\]/g, (match, scrId, ymin, xmin, ymax, xmax) => {
-    return `<button class="page-ref-chip crop-ref-chip" data-scr-id="${scrId}" data-rect="${ymin},${xmin},${ymax},${xmax}" title="View visual crop">
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h18v18H3zM8 3v18M16 3v18M3 8h18M3 16h18"/></svg>
-      View visual clip
-    </button>`;
-  });
-}
-
-// ─── Page reference popup handler ───
-document.addEventListener('click', (e) => {
-  const cropChip = e.target.closest('.crop-ref-chip');
-  if (cropChip) {
-    const existingPopup = document.querySelector('.page-ref-popup');
-    if (existingPopup) existingPopup.remove();
-
-    const scrId = cropChip.dataset.scrId;
-    const [ymin, xmin, ymax, xmax] = cropChip.dataset.rect.split(',').map(Number);
-    
-    const scrRef = globalReferences.find(r => r.id === scrId);
-    if (!scrRef || !scrRef.url) return;
-
-    const popup = document.createElement('div');
-    popup.className = 'page-ref-popup';
-    popup.innerHTML = `
-      <div class="page-ref-popup-header">
-        <span class="page-ref-popup-title">Visual Highlight</span>
-        <button class="page-ref-popup-close">&times;</button>
-      </div>
-      <div class="page-ref-popup-body" style="padding:0; text-align:center; background:#000;">
-        <canvas id="crop-canvas-${scrId}" style="max-width:100%; border-radius: 0 0 16px 16px;"></canvas>
-      </div>
-    `;
-
-    cropChip.closest('.message').appendChild(popup);
-    popup.querySelector('.page-ref-popup-close').addEventListener('click', () => popup.remove());
-
-    const img = new Image();
-    img.onload = () => {
-      const cvs = document.getElementById(`crop-canvas-${scrId}`);
-      if (!cvs) return;
-      const ctx = cvs.getContext('2d');
-      const sw = Math.floor(((xmax - xmin) / 1000) * img.width);
-      const sh = Math.floor(((ymax - ymin) / 1000) * img.height);
-      const sx = Math.floor((xmin / 1000) * img.width);
-      const sy = Math.floor((ymin / 1000) * img.height);
-      
-      cvs.width = sw;
-      cvs.height = sh;
-      ctx.drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
-    };
-    img.src = scrRef.url;
-    return;
-  }
-  const chip = e.target.closest('.page-ref-chip');
-
-  // Close any existing popup if clicking elsewhere
-  const existingPopup = document.querySelector('.page-ref-popup');
-  if (existingPopup && !chip) {
-    existingPopup.remove();
-    return;
-  }
-
-  if (!chip) return;
-
-  // Remove existing popup
-  if (existingPopup) existingPopup.remove();
-
-  const refId = chip.dataset.refId;
-  const section = globalReferences.find(s => s.id === refId);
-  if (!section) return;
-
-  const popup = document.createElement('div');
-  popup.className = 'page-ref-popup';
-  popup.innerHTML = `
-    <div class="page-ref-popup-header">
-      <span class="page-ref-popup-title">${section.title}</span>
-      <button class="page-ref-popup-close">&times;</button>
-    </div>
-    <div class="page-ref-popup-body">${section.content.replace(/</g, '&lt;').replace(/\n/g, '<br>')}</div>
-  `;
-
-  popup.querySelector('.page-ref-popup-close').addEventListener('click', () => popup.remove());
-
-  chip.closest('.message').appendChild(popup);
-});
 
 // ─── Configure PDF.js worker ───
 if (typeof pdfjsLib !== 'undefined') {
@@ -155,12 +56,9 @@ let selectedDocuments = []; // Array of { name, content }
 let conversationHistory = [];
 let agentModeActive = false;
 let deepThinkActive = false;
-let globalReferences = []; // Persistent references across turns
-
 // ─── Initialize Chat State ───
 document.addEventListener('DOMContentLoaded', async () => {
-  const data = await chrome.storage.local.get(['conversationHistory', 'globalReferences']);
-  if (data.globalReferences) globalReferences = data.globalReferences;
+  const data = await chrome.storage.local.get(['conversationHistory']);
   if (data.conversationHistory && Array.isArray(data.conversationHistory) && data.conversationHistory.length > 0) {
     conversationHistory = data.conversationHistory;
     
@@ -279,8 +177,7 @@ settingsButton.addEventListener('click', () => {
 clearButton.addEventListener('click', () => {
   chatContainer.innerHTML = '';
   conversationHistory = [];
-  globalReferences = [];
-  chrome.storage.local.remove(['conversationHistory', 'globalReferences']);
+  chrome.storage.local.remove(['conversationHistory']);
   const welcome = document.createElement('div');
   welcome.className = 'welcome';
   welcome.innerHTML = `
@@ -516,21 +413,7 @@ async function handleSend() {
 
       if (injectionResults && injectionResults[0] && injectionResults[0].result) {
         const result = injectionResults[0].result;
-        const sections = result.sections || [];
-        
-        let sectionList = '';
-        if (sections.length > 0) {
-          const sessionPrefix = Math.random().toString(36).substring(2, 6);
-          sectionList = '\n\nPAGE SECTIONS (use [[ref:ID]] to reference):\n';
-          sections.forEach(s => {
-            const refId = `web-${sessionPrefix}-${s.id}`;
-            sectionList += `[Section ${refId}] "${s.title}"\n`;
-            globalReferences.push({ id: refId, title: s.title, content: s.content });
-          });
-          chrome.storage.local.set({ globalReferences });
-        }
-        
-        pageContext = `[Context of active page: ${result.title}]${sectionList}\n\n${result.text}`;
+        pageContext = `[Context of active page: ${result.title}]\n\n${result.text}`;
       }
     }
   } catch (err) {
@@ -540,15 +423,11 @@ async function handleSend() {
 
   // Capture screenshot of the active tab (skip when PDF is attached — not relevant)
   let screenshotUrl = null;
-  let screenshotRefId = null;
   if (currentDocs.length === 0) {
     try {
       const res = await chrome.runtime.sendMessage({ action: 'captureScreen' });
       if (res && res.screenshot) {
         screenshotUrl = res.screenshot;
-        screenshotRefId = `scr-${Math.random().toString(36).substring(2, 6)}`;
-        globalReferences.push({ id: screenshotRefId, type: 'screenshot', url: screenshotUrl });
-        chrome.storage.local.set({ globalReferences });
       }
     } catch (err) {
       console.log('Could not capture screenshot:', err);
@@ -562,44 +441,12 @@ async function handleSend() {
 
   let finalMessageToAI = uiMessageText;
   if (currentDocs.length > 0) {
-    const sessionPrefix = Math.random().toString(36).substring(2, 6);
-    let docRefIdx = 1;
-    let docRefList = '\n\nDOCUMENT SECTIONS (use [[ref:ID]] to reference them if helpful):\n';
-    let hasDocRefs = false;
-    
     for (const doc of currentDocs) {
-      const pageRegex = /\[Page (\d+)\]\n([\s\S]*?)(?=(?:\[Page \d+\]|$))/g;
-      let match;
-      let docHasPages = false;
-      while ((match = pageRegex.exec(doc.content)) !== null) {
-        docHasPages = true;
-        const pNum = match[1];
-        const pText = match[2].trim();
-        if (pText.length > 0) {
-          const refId = `doc-${sessionPrefix}-${docRefIdx++}`;
-          docRefList += `[Section ${refId}] "${doc.name} - Page ${pNum}"\n`;
-          globalReferences.push({ id: refId, title: `${doc.name} (Page ${pNum})`, content: pText });
-          hasDocRefs = true;
-        }
-      }
-      
-      if (!docHasPages && doc.content.length > 0) {
-        const refId = `doc-${sessionPrefix}-${docRefIdx++}`;
-        docRefList += `[Section ${refId}] "${doc.name}"\n`;
-        globalReferences.push({ id: refId, title: doc.name, content: doc.content.substring(0, 5000) });
-        hasDocRefs = true;
-      }
-      
       finalMessageToAI += `\n\n<document_content name="${doc.name}">\n${doc.content}\n</document_content>`;
-    }
-    
-    if (hasDocRefs) {
-      finalMessageToAI += docRefList;
-      chrome.storage.local.set({ globalReferences });
     }
   }
 
-  await processLLMResponse(finalMessageToAI, pageContext, thinkingEl, currentImages, screenshotUrl, deepThinkActive, screenshotRefId);
+  await processLLMResponse(finalMessageToAI, pageContext, thinkingEl, currentImages, screenshotUrl, deepThinkActive);
 }
 
 function appendUserMessage(text, imageUrl, saveToHistory = true) {
@@ -728,7 +575,7 @@ async function callLLM(apiConfig, messages, signal) {
   return data.choices[0].message.content.trim();
 }
 
-async function processLLMResponse(userMessage, contextData, thinkingEl, images, screenshotUrl, isDeepThink, screenshotRefId = null) {
+async function processLLMResponse(userMessage, contextData, thinkingEl, images, screenshotUrl, isDeepThink) {
   const apiConfig = await getApiConfig();
   if (!apiConfig) {
     thinkingEl.textContent = 'Error: Please configure AI provider and API key in settings.';
@@ -757,9 +604,7 @@ async function processLLMResponse(userMessage, contextData, thinkingEl, images, 
     });
   }
 
-  const cropInstruction = screenshotRefId 
-    ? `\n7. VISUAL CROPS: To point out a specific visual detail in the screenshot, use [[crop:${screenshotRefId}:ymin,xmin,ymax,xmax]] where coordinates are 0-1000 percentages. Example: "Look at the icon [[crop:${screenshotRefId}:200,100,250,150]]".` 
-    : '';
+
 
   const systemPrompt = deepThinkActive
     ? `You are Alvelika, a sophisticated and proactive AI research assistant. 
@@ -816,8 +661,7 @@ CRITICAL INSTRUCTIONS:
 
 3. Inside <answer>, write your final response informed by all 12 answers above.
 4. PROVE YOU ARE WATCHING: If the page is relevant, mention a specific detail from the page (like the title, a name, or a fact).
-5. PAGE REFERENCES: When you reference or quote a specific section from the page, use [[ref:ID]] where ID is the section number from the PAGE SECTIONS list. Example: "As mentioned in [[ref:3]], the algorithm uses..." — this creates a clickable reference for the user. Only use valid section IDs from the list provided. Do not fabricate IDs.
-6. BE KIND & ELEGANT: Use Markdown (###, **, -) to make the answer beautiful. NO EMOJIS ALLOWED.${cropInstruction}`
+5. BE KIND & ELEGANT: Use Markdown (###, **, -) to make the answer beautiful. NO EMOJIS ALLOWED.`
     : `You are Alvelika, a dedicated educational AI assistant designed to help students deeply understand documents and web pages.
 You are "watching" the screen with the student. You receive both the page's text AND a screenshot of what they currently see.
 You are part of a persistent chat session. The user may switch between normal chat and "Agent mode" (where you autonomously perform browser actions). The conversation history below contains ALL messages — including agent task requests, agent results, and agent interruptions. Use this history to understand what has happened so far.
@@ -832,8 +676,7 @@ CRITICAL INSTRUCTIONS:
 2. Respond directly to the user. Do NOT use any XML tags like <thought> or <answer>. Just write the response.
 3. PROVE YOU ARE WATCHING: When relevant, explicitly mention specific details, terms, or phrases from the page context to anchor your explanations in what the student is actively looking at.
 4. BE KIND, ENCOURAGING & ELEGANT: Use a supportive, teacher-like tone. Use Markdown (###, **, -) to make the answer beautiful and easy to read. YOU MUST NOT USE ANY EMOJIS (NO SMILEYS, NO ICONS) UNDER ANY CIRCUMSTANCES.
-5. PAGE REFERENCES: When you reference or quote a specific section from the page, use [[ref:ID]] where ID is the section number from the PAGE SECTIONS list. Example: "As explained in [[ref:2]], this concept..." — this creates a clickable reference for the user. Only use valid section IDs from the list provided. Do not fabricate IDs.
-6. If the conversation history contains agent results, you are aware of what happened and can reference those results naturally.${cropInstruction}`;
+5. If the conversation history contains agent results, you are aware of what happened and can reference those results naturally.`;
 
   // Push user message into conversation history
   conversationHistory.push({ role: 'user', content: userContent });
@@ -1972,8 +1815,6 @@ function streamText(fullText, container, signal) {
     } else {
       container.textContent = fullText;
     }
-
-    processPageReferences(container);
 
     requestAnimationFrame(() => {
       container.style.transition = 'opacity 0.4s ease, transform 0.4s ease';
