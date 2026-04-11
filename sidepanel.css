@@ -978,6 +978,189 @@ body::before {
 }
 
 /* ═══════════════════════════════════════════════
+   AGENT RUNNING FULL-PANEL VIEW
+   ═══════════════════════════════════════════════ */
+#agent-running-view {
+  position: absolute;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-primary);
+  overflow: hidden;
+}
+
+.agent-running-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 32px 24px;
+  position: relative;
+  z-index: 1;
+}
+
+.agent-running-glow {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background:
+    radial-gradient(ellipse at 50% 30%, rgba(124, 92, 252, 0.12) 0%, transparent 60%),
+    radial-gradient(ellipse at 30% 70%, rgba(56, 189, 248, 0.06) 0%, transparent 50%),
+    radial-gradient(ellipse at 70% 80%, rgba(167, 139, 250, 0.08) 0%, transparent 50%);
+  animation: agentGlowPulse 4s ease-in-out infinite;
+}
+
+@keyframes agentGlowPulse {
+  0%, 100% { opacity: 0.7; }
+  50% { opacity: 1; }
+}
+
+.agent-running-logo {
+  width: 64px;
+  height: 64px;
+  object-fit: contain;
+  filter: drop-shadow(0 4px 20px rgba(124, 92, 252, 0.5));
+  animation: agentLogoPulse 2.5s ease-in-out infinite;
+  position: relative;
+  z-index: 1;
+}
+
+@keyframes agentLogoPulse {
+  0%, 100% { transform: scale(1); filter: drop-shadow(0 4px 20px rgba(124, 92, 252, 0.5)); }
+  50% { transform: scale(1.06); filter: drop-shadow(0 4px 28px rgba(124, 92, 252, 0.7)); }
+}
+
+.agent-running-title {
+  margin-top: 20px;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  background: linear-gradient(135deg, #e8e8ef 0%, var(--accent-bright) 50%, var(--cyan) 100%);
+  background-size: 200% 200%;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  animation: shimmerTitle 4s ease-in-out infinite;
+  position: relative;
+  z-index: 1;
+}
+
+.agent-running-detail {
+  margin-top: 10px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  max-width: 260px;
+  position: relative;
+  z-index: 1;
+}
+
+.agent-running-step {
+  margin-top: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--accent-bright);
+  position: relative;
+  z-index: 1;
+}
+
+.agent-running-orbits {
+  position: relative;
+  width: 80px;
+  height: 80px;
+  margin-top: 24px;
+  z-index: 1;
+}
+
+.agent-running-ring {
+  position: absolute;
+  inset: 50% auto auto 50%;
+  border-radius: 999px;
+  border: 1px solid rgba(124, 92, 252, 0.25);
+  transform: translate(-50%, -50%);
+}
+
+.agent-running-ring.one {
+  width: 70px;
+  height: 70px;
+  animation: orbitSpinPanel 4.3s linear infinite;
+}
+
+.agent-running-ring.two {
+  width: 46px;
+  height: 46px;
+  border-color: rgba(56, 189, 248, 0.3);
+  animation: orbitSpinReversePanel 3.2s linear infinite;
+}
+
+.agent-running-ring::before {
+  content: "";
+  position: absolute;
+  top: -3px;
+  left: 50%;
+  width: 7px;
+  height: 7px;
+  margin-left: -3.5px;
+  border-radius: 999px;
+  background: var(--accent-bright);
+  box-shadow: 0 0 12px rgba(124, 92, 252, 0.8);
+}
+
+.agent-running-core {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  transform: translate(-50%, -50%);
+  background: radial-gradient(circle, #fff, var(--accent-bright));
+  box-shadow:
+    0 0 20px rgba(124, 92, 252, 0.6),
+    0 0 40px rgba(124, 92, 252, 0.2);
+}
+
+@keyframes orbitSpinPanel {
+  from { transform: translate(-50%, -50%) rotate(0deg); }
+  to { transform: translate(-50%, -50%) rotate(360deg); }
+}
+
+@keyframes orbitSpinReversePanel {
+  from { transform: translate(-50%, -50%) rotate(360deg); }
+  to { transform: translate(-50%, -50%) rotate(0deg); }
+}
+
+.agent-running-stop-btn {
+  margin-top: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 24px;
+  border-radius: var(--radius-pill);
+  border: 1px solid rgba(248, 113, 113, 0.35);
+  background: rgba(248, 113, 113, 0.08);
+  color: #fca5a5;
+  font-family: 'Inter', sans-serif;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  position: relative;
+  z-index: 1;
+}
+
+.agent-running-stop-btn:hover {
+  background: rgba(248, 113, 113, 0.18);
+  border-color: rgba(248, 113, 113, 0.55);
+  color: #fff;
+  box-shadow: 0 0 16px rgba(248, 113, 113, 0.15);
+}
+
+/* ═══════════════════════════════════════════════
    AGENT THINKING BLOCK
    ═══════════════════════════════════════════════ */
 .agent-thinking {

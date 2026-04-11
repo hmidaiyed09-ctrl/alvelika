@@ -23,6 +23,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     });
     return true;
   }
+
+  // Stop agent from content script (overlay stop button / Ctrl+C)
+  if (request.action === 'forceStopAgent') {
+    chrome.storage.local.set({ agentForceStop: true });
+    chrome.storage.local.set({ agentOverlayState: { active: false } });
+    sendResponse({ ok: true });
+    return true;
+  }
 });
 
 async function handleTranslation(text, targetLang) {

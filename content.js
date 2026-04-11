@@ -174,6 +174,40 @@ const agentOverlay = (() => {
           letter-spacing: 0.08em;
           text-transform: uppercase;
         }
+        .stop-btn {
+          margin-top: 16px;
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          padding: 10px 20px;
+          border-radius: 999px;
+          border: 1px solid rgba(248, 113, 113, 0.4);
+          background: rgba(248, 113, 113, 0.12);
+          color: #fca5a5;
+          font-size: 13px;
+          font-weight: 600;
+          letter-spacing: 0.03em;
+          cursor: pointer;
+          transition: all 0.2s ease;
+        }
+        .stop-btn:hover {
+          background: rgba(248, 113, 113, 0.25);
+          border-color: rgba(248, 113, 113, 0.6);
+          color: #fff;
+          box-shadow: 0 0 18px rgba(248, 113, 113, 0.2);
+        }
+        .stop-btn svg {
+          flex-shrink: 0;
+        }
+        .stop-kbd {
+          font-size: 10px;
+          padding: 2px 6px;
+          border-radius: 4px;
+          background: rgba(255, 255, 255, 0.08);
+          border: 1px solid rgba(255, 255, 255, 0.12);
+          color: rgba(255, 239, 255, 0.6);
+          font-family: monospace;
+        }
         .orbit {
           position: relative;
           margin-top: 18px;
@@ -296,6 +330,10 @@ const agentOverlay = (() => {
           <div class="title">Working on this page</div>
           <div class="detail">Please wait while the agent navigates. Clicks are temporarily locked.</div>
           <div class="step">Agent mode active</div>
+          <button class="stop-btn" id="alvelika-stop-agent">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+            Stop Agent <span class="stop-kbd">Ctrl+C</span>
+          </button>
           <div class="orbit" aria-hidden="true">
             <div class="ring one"></div>
             <div class="ring two"></div>
@@ -311,6 +349,8 @@ const agentOverlay = (() => {
     stepEl = shadow.querySelector('.step');
 
     const swallowEvent = (event) => {
+      // Allow clicks on the stop button
+      if (event.target.closest && event.target.closest('.stop-btn')) return;
       event.preventDefault();
       event.stopPropagation();
     };
@@ -319,6 +359,15 @@ const agentOverlay = (() => {
       overlay.addEventListener(eventName, swallowEvent, { passive: false });
     });
     overlay.addEventListener('keydown', swallowEvent, true);
+
+    // Stop Agent button click handler
+    const stopBtn = shadow.querySelector('.stop-btn');
+    if (stopBtn) {
+      stopBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        chrome.runtime.sendMessage({ action: 'forceStopAgent' });
+      });
+    }
 
     document.documentElement.appendChild(host);
   }
@@ -359,6 +408,15 @@ const agentOverlay = (() => {
 
   return { show, hide, sync, isActive };
 })();
+
+// Ctrl+C to stop the agent when overlay is active
+document.addEventListener('keydown', (e) => {
+  if (e.ctrlKey && e.key === 'c' && agentOverlay.isActive()) {
+    e.preventDefault();
+    e.stopPropagation();
+    chrome.runtime.sendMessage({ action: 'forceStopAgent' });
+  }
+}, true);
 
 chrome.storage.local.get([AGENT_OVERLAY_STORAGE_KEY]).then((data) => {
   if (data && data[AGENT_OVERLAY_STORAGE_KEY]) {

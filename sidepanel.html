@@ -29,6 +29,26 @@
     </div>
   </header>
 
+  <!-- Agent Running Minimal View (hidden by default) -->
+  <div id="agent-running-view" class="hidden">
+    <div class="agent-running-content">
+      <div class="agent-running-glow"></div>
+      <img src="logo.png" alt="Alvelika" class="agent-running-logo">
+      <h2 class="agent-running-title">Agent is Working</h2>
+      <p class="agent-running-detail" id="agent-running-detail">Executing your task…</p>
+      <p class="agent-running-step" id="agent-running-step">PREPARING</p>
+      <div class="agent-running-orbits">
+        <div class="agent-running-ring one"></div>
+        <div class="agent-running-ring two"></div>
+        <div class="agent-running-core"></div>
+      </div>
+      <button id="agent-running-stop" class="agent-running-stop-btn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+        Stop Agent
+      </button>
+    </div>
+  </div>
+
   <main class="chat-area" id="chat-container">
     <div class="welcome">
       <img src="logo.png" alt="" class="welcome-logo">

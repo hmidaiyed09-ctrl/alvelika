@@ -1547,6 +1547,10 @@ async function updateAgentPageOverlay(state = {}) {
     updatedAt: Date.now()
   };
 
+  // Also update the side panel's agent running view
+  if (agentRunningDetail && state.detail) agentRunningDetail.textContent = state.detail;
+  if (agentRunningStep && state.step) agentRunningStep.textContent = state.step;
+
   try {
     await chrome.storage.local.set({ [AGENT_OVERLAY_STORAGE_KEY]: overlayState });
   } catch (err) {
@@ -1578,6 +1582,45 @@ function hideAgentRunningUI() {
   sendButton.classList.remove('hidden');
 }
 
+const agentRunningView = document.getElementById('agent-running-view');
+const agentRunningDetail = document.getElementById('agent-running-detail');
+const agentRunningStep = document.getElementById('agent-running-step');
+const agentRunningStopBtn = document.getElementById('agent-running-stop');
+
+function showAgentRunningView() {
+  document.querySelector('.header').classList.add('hidden');
+  chatContainer.classList.add('hidden');
+  document.querySelector('.input-bar').classList.add('hidden');
+  agentRunningView.classList.remove('hidden');
+}
+
+function hideAgentRunningView() {
+  agentRunningView.classList.add('hidden');
+  document.querySelector('.header').classList.remove('hidden');
+  chatContainer.classList.remove('hidden');
+  document.querySelector('.input-bar').classList.remove('hidden');
+}
+
+// Stop button inside the agent running view
+agentRunningStopBtn.addEventListener('click', async () => {
+  if (currentAbortController) {
+    currentAbortController.abort();
+    currentAbortController = null;
+  }
+  agentRunning = false;
+  hideAgentRunningUI();
+  await updateAgentPageOverlay({ active: false });
+  hideAgentRunningView();
+
+  if (activeAgentThinkingEl && activeAgentThinkingEl.isConnected) {
+    activeAgentThinkingEl.remove();
+    activeAgentThinkingEl = null;
+  }
+  appendAIMessage('Request stopped by user.', { className: 'message ai' });
+  conversationHistory.push({ role: 'assistant', content: '[Request stopped by user.]' });
+  chrome.storage.local.set({ conversationHistory });
+});
+
 let activeAgentThinkingEl = null;
 
 stopAgentButton.addEventListener('click', async () => {
@@ -1588,6 +1631,7 @@ stopAgentButton.addEventListener('click', async () => {
   
   agentRunning = false;
   hideAgentRunningUI();
+  hideAgentRunningView();
   await updateAgentPageOverlay({ active: false });
   
   // Remove any active thinking indicator
@@ -1599,6 +1643,30 @@ stopAgentButton.addEventListener('click', async () => {
   // Record the stop event in conversation history so the AI remembers
   conversationHistory.push({ role: 'assistant', content: '[Request stopped by user.]' });
   chrome.storage.local.set({ conversationHistory });
+});
+
+// Listen for force-stop signal from the overlay stop button (via content script → background)
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName === 'local' && changes.agentForceStop && changes.agentForceStop.newValue === true) {
+    // Clear the flag immediately
+    chrome.storage.local.remove('agentForceStop');
+    
+    if (currentAbortController) {
+      currentAbortController.abort();
+      currentAbortController = null;
+    }
+    agentRunning = false;
+    hideAgentRunningUI();
+    hideAgentRunningView();
+    
+    if (activeAgentThinkingEl && activeAgentThinkingEl.isConnected) {
+      activeAgentThinkingEl.remove();
+      activeAgentThinkingEl = null;
+    }
+    appendAIMessage('Request stopped by user.', { className: 'message ai' });
+    conversationHistory.push({ role: 'assistant', content: '[Request stopped by user.]' });
+    chrome.storage.local.set({ conversationHistory });
+  }
 });
 
 async function handleAgentSend(userGoal) {
@@ -1617,6 +1685,9 @@ async function handleAgentSend(userGoal) {
     detail: 'Understanding your goal and locking the page so nothing gets interrupted.',
     step: 'Preparing'
   });
+
+  // Switch to minimal agent-running view
+  showAgentRunningView();
 
   try {
     // Push user message into shared conversation history so normal chat remembers it
@@ -1879,6 +1950,9 @@ async function handleAgentSend(userGoal) {
     currentAbortController = null;
     hideAgentRunningUI();
     await updateAgentPageOverlay({ active: false });
+
+    // Restore normal chat UI
+    hideAgentRunningView();
   }
 }
 
