@@ -1148,6 +1148,7 @@ function buildGoalAnalysisPrompt() {
   return `You are Alvelika Agent. The user just gave you a task.
 You receive the DOM and screenshot of the current page.
 You may also receive the user's PREVIOUS MESSAGES (conversation history) for context.
+If the screenshot contains an Alvelika mauve activity overlay, glowing frame, or status card, ignore it. That overlay belongs to the extension, not the website.
 
 Your job is to ANALYZE the user's request and produce a clear, precise goal.
 Use the conversation history to understand references like "do that again", "now search for the other one", "continue", etc.
@@ -1183,6 +1184,7 @@ You receive these inputs every step:
 - SCREENSHOT: The source of truth. What you SEE is what exists. If the target is visible, act on it.
 - INTERACTIVE ELEMENTS: A categorized list of clickable/typeable elements with ready-to-use selectors (marked with ✅ SELECTOR). Use these selectors.
 - PAGE TEXT: The visible text content of the page.
+- If you see an Alvelika mauve overlay, glowing frame, or status card in the screenshot, ignore it. It is the agent's own activity layer, not part of the page.
 
 USER GOAL: "${userGoal}"
 ${historyBlock}${feedbackBlock}
@@ -1443,6 +1445,7 @@ let agentRunning = false;
 let currentAbortController = null;
 const AGENT_MAX_STEPS = 15;
 const AGENT_MAX_ACTION_RETRIES = 3;
+const AGENT_OVERLAY_STORAGE_KEY = 'agentOverlayState';
 
 function normalizeAgentValue(value) {
   return String(value ?? '').trim().replace(/\s+/g, ' ');
@@ -1535,6 +1538,36 @@ function buildExecutionLogEntry(stepCount, instruct, result, meta = {}) {
   return lines.join('\n');
 }
 
+async function updateAgentPageOverlay(state = {}) {
+  const overlayState = {
+    active: Boolean(state.active),
+    title: state.title || 'Working on this page',
+    detail: state.detail || 'Please wait while the agent works. Clicks are temporarily locked.',
+    step: state.step || 'Agent mode active',
+    updatedAt: Date.now()
+  };
+
+  try {
+    await chrome.storage.local.set({ [AGENT_OVERLAY_STORAGE_KEY]: overlayState });
+  } catch (err) {
+    console.log('Could not persist agent overlay state:', err);
+  }
+
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab || !tab.id) return;
+    if (tab.url && (tab.url.startsWith('chrome://') || tab.url.startsWith('edge://') || tab.url.startsWith('about:'))) {
+      return;
+    }
+    await chrome.tabs.sendMessage(tab.id, {
+      action: 'setAgentOverlay',
+      state: overlayState
+    });
+  } catch (err) {
+    console.log('Could not sync agent overlay to page:', err);
+  }
+}
+
 function showAgentRunningUI() {
   sendButton.classList.add('hidden');
   stopAgentButton.classList.remove('hidden');
@@ -1547,7 +1580,7 @@ function hideAgentRunningUI() {
 
 let activeAgentThinkingEl = null;
 
-stopAgentButton.addEventListener('click', () => {
+stopAgentButton.addEventListener('click', async () => {
   if (currentAbortController) {
     currentAbortController.abort();
     currentAbortController = null;
@@ -1555,6 +1588,7 @@ stopAgentButton.addEventListener('click', () => {
   
   agentRunning = false;
   hideAgentRunningUI();
+  await updateAgentPageOverlay({ active: false });
   
   // Remove any active thinking indicator
   if (activeAgentThinkingEl && activeAgentThinkingEl.isConnected) {
@@ -1577,252 +1611,275 @@ async function handleAgentSend(userGoal) {
   agentRunning = true;
   currentAbortController = new AbortController();
   showAgentRunningUI();
+  await updateAgentPageOverlay({
+    active: true,
+    title: 'Alvelika Agent is working',
+    detail: 'Understanding your goal and locking the page so nothing gets interrupted.',
+    step: 'Preparing'
+  });
 
-  // Push user message into shared conversation history so normal chat remembers it
-  conversationHistory.push({ role: 'user', content: userGoal });
-  chrome.storage.local.set({ conversationHistory });
-
-  // ═══ STEP 0 — Analyze the user's raw prompt ═══
-  const goalThinkingEl = createThinkingState('Understanding your goal…');
-  activeAgentThinkingEl = goalThinkingEl;
-  chatContainer.appendChild(goalThinkingEl);
-  scrollToBottom();
-
-  let refinedGoal = userGoal;
   try {
-    const goalPage = await scrapePageForAgent();
+    // Push user message into shared conversation history so normal chat remembers it
+    conversationHistory.push({ role: 'user', content: userGoal });
+    chrome.storage.local.set({ conversationHistory });
 
-    // Build full conversation history (user + AI messages) for context
-    const historyEntries = conversationHistory.map(msg => {
-      const role = msg.role === 'user' ? 'User' : 'Assistant';
-      const text = typeof msg.content === 'string' ? msg.content : (Array.isArray(msg.content) ? msg.content.filter(c => c.type === 'text').map(c => c.text).join(' ') : '');
-      return `[${role}]: ${text.substring(0, 500)}`;
-    });
-    const historyBlock = historyEntries.length > 0
-      ? `\n\nConversation history (oldest first):\n${historyEntries.join('\n')}`
-      : '';
-
-    const goalUserContent = [
-      { type: 'text', text: `User's raw request: "${userGoal}"${historyBlock}\n\nCurrent page title: ${goalPage.pageTitle}\nCurrent page URL: ${goalPage.pageUrl}\n\nPage text:\n${goalPage.pageText}` }
-    ];
-    if (goalPage.screenshot) {
-      goalUserContent.push({ type: 'image_url', image_url: { url: goalPage.screenshot, detail: 'low' } });
-    }
-
-    const goalRaw = await callLLM(apiConfig, [
-      { role: 'system', content: buildGoalAnalysisPrompt() },
-      { role: 'user', content: goalUserContent }
-    ]);
-
-    const goalCleaned = goalRaw.replace(/^```json?\s*/i, '').replace(/```\s*$/i, '').trim();
-    const goalParsed = JSON.parse(goalCleaned);
-
-    if (goalParsed.user_goal) {
-      refinedGoal = goalParsed.user_goal;
-    }
-
-    // Show Step 0 result
-    updateThinkingState(goalThinkingEl, 'Goal understood.');
-    await delay(400);
-    await fadeOutAndRemove(goalThinkingEl, 300);
-    activeAgentThinkingEl = null;
-
-    const goalDiv = document.createElement('div');
-    goalDiv.className = 'message ai agent-command';
-    goalDiv.innerHTML = `<span class="agent-cmd-icon">🎯</span> <strong>Goal:</strong> ${refinedGoal}`;
-    chatContainer.appendChild(goalDiv);
+    // ═══ STEP 0 — Analyze the user's raw prompt ═══
+    const goalThinkingEl = createThinkingState('Understanding your goal…');
+    activeAgentThinkingEl = goalThinkingEl;
+    chatContainer.appendChild(goalThinkingEl);
     scrollToBottom();
 
-  } catch (err) {
-    await fadeOutAndRemove(goalThinkingEl, 300);
-    activeAgentThinkingEl = null;
-    console.log('Goal analysis failed, using raw prompt:', err);
-  }
-
-  if (!agentRunning) { hideAgentRunningUI(); return; }
-
-  // ═══ AGENT LOOP ═══
-  let executionHistoryLog = null;
-  let lastExecutionFeedback = 'No previous command has been executed yet.';
-  const actionFailureCounts = new Map();
-  const blockedActions = new Map();
-  let stepCount = 0;
-
-  while (agentRunning && stepCount < AGENT_MAX_STEPS) {
-    stepCount++;
-
-    // ── Show thinking state ──
-    const thinkingEl = createThinkingState(`Step ${stepCount} — Analyzing the page…`);
-    activeAgentThinkingEl = thinkingEl;
-    chatContainer.appendChild(thinkingEl);
-    scrollToBottom();
-
-    // ── 1. Scrape the page ──
-    const page = await scrapePageForAgent();
-
-    // ── 2. Build messages ──
-    const executionFeedbackBlock = buildExecutionFeedbackBlock(
-      lastExecutionFeedback,
-      Array.from(blockedActions.values())
-    );
-    const systemPrompt = buildAgentSystemPrompt(refinedGoal, executionHistoryLog, executionFeedbackBlock);
-    const userContent = [
-      { type: 'text', text: `Current page title: ${page.pageTitle}\nCurrent page URL: ${page.pageUrl}\n\nINTERACTIVE ELEMENTS:\n${page.elements}\n\nPAGE TEXT:\n${page.pageText}` }
-    ];
-    if (page.screenshot) {
-      userContent.push({ type: 'image_url', image_url: { url: page.screenshot, detail: 'low' } });
-    }
-
-    // ── 4. Call LLM ──
-    let parsed;
+    let refinedGoal = userGoal;
     try {
-      const rawResult = await callLLM(apiConfig, [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userContent }
-      ], currentAbortController.signal);
+      const goalPage = await scrapePageForAgent();
 
-      // Strip code fences if AI wraps in ```json
-      const cleaned = rawResult.replace(/^```json?\s*/i, '').replace(/```\s*$/i, '').trim();
-      parsed = JSON.parse(cleaned);
+      // Build full conversation history (user + AI messages) for context
+      const historyEntries = conversationHistory.map(msg => {
+        const role = msg.role === 'user' ? 'User' : 'Assistant';
+        const text = typeof msg.content === 'string' ? msg.content : (Array.isArray(msg.content) ? msg.content.filter(c => c.type === 'text').map(c => c.text).join(' ') : '');
+        return `[${role}]: ${text.substring(0, 500)}`;
+      });
+      const historyBlock = historyEntries.length > 0
+        ? `\n\nConversation history (oldest first):\n${historyEntries.join('\n')}`
+        : '';
+
+      const goalUserContent = [
+        { type: 'text', text: `User's raw request: "${userGoal}"${historyBlock}\n\nCurrent page title: ${goalPage.pageTitle}\nCurrent page URL: ${goalPage.pageUrl}\n\nPage text:\n${goalPage.pageText}` }
+      ];
+      if (goalPage.screenshot) {
+        goalUserContent.push({ type: 'image_url', image_url: { url: goalPage.screenshot, detail: 'low' } });
+      }
+
+      const goalRaw = await callLLM(apiConfig, [
+        { role: 'system', content: buildGoalAnalysisPrompt() },
+        { role: 'user', content: goalUserContent }
+      ]);
+
+      const goalCleaned = goalRaw.replace(/^```json?\s*/i, '').replace(/```\s*$/i, '').trim();
+      const goalParsed = JSON.parse(goalCleaned);
+
+      if (goalParsed.user_goal) {
+        refinedGoal = goalParsed.user_goal;
+      }
+
+      // Show Step 0 result
+      updateThinkingState(goalThinkingEl, 'Goal understood.');
+      await delay(400);
+      await fadeOutAndRemove(goalThinkingEl, 300);
+      activeAgentThinkingEl = null;
+
+      const goalDiv = document.createElement('div');
+      goalDiv.className = 'message ai agent-command';
+      goalDiv.innerHTML = `<span class="agent-cmd-icon">🎯</span> <strong>Goal:</strong> ${refinedGoal}`;
+      chatContainer.appendChild(goalDiv);
+      scrollToBottom();
+
     } catch (err) {
-      if (err.name === 'AbortError' || err.message.includes('aborted')) break;
-      await fadeOutAndRemove(thinkingEl, 400);
-      appendAIMessage(`Agent error at step ${stepCount}: ${err.message}`, { className: 'message ai' });
-      agentRunning = false;
-      break;
+      await fadeOutAndRemove(goalThinkingEl, 300);
+      activeAgentThinkingEl = null;
+      console.log('Goal analysis failed, using raw prompt:', err);
     }
 
-    // ── 5. Show thinking (collapsible) ──
-    updateThinkingState(thinkingEl, `Step ${stepCount} — Thinking…`);
-    await delay(400);
-    await fadeOutAndRemove(thinkingEl, 300);
-    activeAgentThinkingEl = null;
+    if (!agentRunning) return;
 
-    const thinking = parsed.thinking;
-    if (thinking) {
-      const thinkingDiv = document.createElement('div');
-      thinkingDiv.className = 'message ai agent-thinking';
+    // ═══ AGENT LOOP ═══
+    let executionHistoryLog = null;
+    let lastExecutionFeedback = 'No previous command has been executed yet.';
+    const actionFailureCounts = new Map();
+    const blockedActions = new Map();
+    let stepCount = 0;
 
-      const thinkingHeader = document.createElement('div');
-      thinkingHeader.className = 'agent-thinking-header';
-      thinkingHeader.innerHTML = `<span class="agent-thinking-icon">🧠</span> <span>Step ${stepCount} — Thinking</span> <span class="agent-thinking-toggle">▶</span>`;
-      thinkingDiv.appendChild(thinkingHeader);
-
-      const thinkingBody = document.createElement('div');
-      thinkingBody.className = 'agent-thinking-body collapsed';
-      const thinkingMd = [
-        `**Goal Check:** ${thinking.goal_check || '—'}`,
-        `**State:** ${thinking.state || '—'}`,
-        `**Target:** ${thinking.target || '—'}`,
-        `**Reason:** ${thinking.action_reason || '—'}`
-      ].join('\n\n');
-
-      if (typeof marked !== 'undefined') {
-        thinkingBody.innerHTML = marked.parse(thinkingMd);
-      } else {
-        thinkingBody.textContent = thinkingMd;
-      }
-      thinkingDiv.appendChild(thinkingBody);
-
-      thinkingHeader.addEventListener('click', () => {
-        thinkingBody.classList.toggle('collapsed');
-        thinkingHeader.querySelector('.agent-thinking-toggle').textContent =
-          thinkingBody.classList.contains('collapsed') ? '▶' : '▼';
+    while (agentRunning && stepCount < AGENT_MAX_STEPS) {
+      stepCount++;
+      await updateAgentPageOverlay({
+        active: true,
+        title: 'Alvelika Agent is working',
+        detail: `Step ${stepCount}: analyzing the page and planning the next move.`,
+        step: `Step ${stepCount} • analyzing`
       });
 
-      chatContainer.appendChild(thinkingDiv);
+      // ── Show thinking state ──
+      const thinkingEl = createThinkingState(`Step ${stepCount} — Analyzing the page…`);
+      activeAgentThinkingEl = thinkingEl;
+      chatContainer.appendChild(thinkingEl);
+      scrollToBottom();
+
+      // ── 1. Scrape the page ──
+      const page = await scrapePageForAgent();
+
+      // ── 2. Build messages ──
+      const executionFeedbackBlock = buildExecutionFeedbackBlock(
+        lastExecutionFeedback,
+        Array.from(blockedActions.values())
+      );
+      const systemPrompt = buildAgentSystemPrompt(refinedGoal, executionHistoryLog, executionFeedbackBlock);
+      const userContent = [
+        { type: 'text', text: `Current page title: ${page.pageTitle}\nCurrent page URL: ${page.pageUrl}\n\nINTERACTIVE ELEMENTS:\n${page.elements}\n\nPAGE TEXT:\n${page.pageText}` }
+      ];
+      if (page.screenshot) {
+        userContent.push({ type: 'image_url', image_url: { url: page.screenshot, detail: 'low' } });
+      }
+
+      // ── 4. Call LLM ──
+      let parsed;
+      try {
+        const rawResult = await callLLM(apiConfig, [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userContent }
+        ], currentAbortController.signal);
+
+        // Strip code fences if AI wraps in ```json
+        const cleaned = rawResult.replace(/^```json?\s*/i, '').replace(/```\s*$/i, '').trim();
+        parsed = JSON.parse(cleaned);
+      } catch (err) {
+        if (err.name === 'AbortError' || err.message.includes('aborted')) break;
+        await fadeOutAndRemove(thinkingEl, 400);
+        appendAIMessage(`Agent error at step ${stepCount}: ${err.message}`, { className: 'message ai' });
+        agentRunning = false;
+        break;
+      }
+
+      // ── 5. Show thinking (collapsible) ──
+      updateThinkingState(thinkingEl, `Step ${stepCount} — Thinking…`);
+      await delay(400);
+      await fadeOutAndRemove(thinkingEl, 300);
+      activeAgentThinkingEl = null;
+
+      const thinking = parsed.thinking;
+      if (thinking) {
+        const thinkingDiv = document.createElement('div');
+        thinkingDiv.className = 'message ai agent-thinking';
+
+        const thinkingHeader = document.createElement('div');
+        thinkingHeader.className = 'agent-thinking-header';
+        thinkingHeader.innerHTML = `<span class="agent-thinking-icon">🧠</span> <span>Step ${stepCount} — Thinking</span> <span class="agent-thinking-toggle">▶</span>`;
+        thinkingDiv.appendChild(thinkingHeader);
+
+        const thinkingBody = document.createElement('div');
+        thinkingBody.className = 'agent-thinking-body collapsed';
+        const thinkingMd = [
+          `**Goal Check:** ${thinking.goal_check || '—'}`,
+          `**State:** ${thinking.state || '—'}`,
+          `**Target:** ${thinking.target || '—'}`,
+          `**Reason:** ${thinking.action_reason || '—'}`
+        ].join('\n\n');
+
+        if (typeof marked !== 'undefined') {
+          thinkingBody.innerHTML = marked.parse(thinkingMd);
+        } else {
+          thinkingBody.textContent = thinkingMd;
+        }
+        thinkingDiv.appendChild(thinkingBody);
+
+        thinkingHeader.addEventListener('click', () => {
+          thinkingBody.classList.toggle('collapsed');
+          thinkingHeader.querySelector('.agent-thinking-toggle').textContent =
+            thinkingBody.classList.contains('collapsed') ? '▶' : '▼';
+        });
+
+        chatContainer.appendChild(thinkingDiv);
+        scrollToBottom();
+      }
+
+      // ── 6. Show the command being executed ──
+      const instruct = parsed.instruct;
+      if (!instruct || !instruct.type) {
+        appendAIMessage('Agent returned invalid command. Stopping.', { className: 'message ai' });
+        agentRunning = false;
+        break;
+      }
+
+      const cmdDiv = document.createElement('div');
+      cmdDiv.className = 'message ai agent-command';
+      cmdDiv.innerHTML = `<span class="agent-cmd-icon">⚡</span> <strong>Step ${stepCount}:</strong> ${instruct.description || instruct.type}`;
+      chatContainer.appendChild(cmdDiv);
+      scrollToBottom();
+
+      await updateAgentPageOverlay({
+        active: true,
+        title: 'Alvelika Agent is working',
+        detail: instruct.description || `Executing ${instruct.type}.`,
+        step: `Step ${stepCount} • ${instruct.type}`
+      });
+
+      // ── 7. Check if done ──
+      if (instruct.type === 'done') {
+        const doneText = instruct.description || 'Goal completed.';
+        appendAIMessage(doneText, { stream: true });
+        // Feed agent result back into shared conversation history so normal chat remembers it
+        conversationHistory.push({ role: 'assistant', content: `[Agent completed] Goal: ${refinedGoal}\nResult: ${doneText}` });
+        chrome.storage.local.set({ conversationHistory });
+        agentRunning = false;
+        break;
+      }
+
+      // ── 8. Execute the command with retry guards ──
+      const actionSignature = getAgentActionSignature(instruct);
+      const priorFailureCount = isRetryTrackedAgentAction(instruct)
+        ? (actionFailureCounts.get(actionSignature) || 0)
+        : 0;
+
+      let blockedReason = blockedActions.get(actionSignature) || null;
+      let result;
+
+      if (isRetryTrackedAgentAction(instruct) && priorFailureCount >= AGENT_MAX_ACTION_RETRIES) {
+        blockedReason = blockedReason || `${formatAgentCommand(instruct)} is blocked after ${AGENT_MAX_ACTION_RETRIES} failed attempts. Choose a different selector or approach.`;
+        blockedActions.set(actionSignature, blockedReason);
+        result = {
+          success: false,
+          errorType: 'retry_limit_reached',
+          error: blockedReason
+        };
+      } else {
+        result = await executeAgentCommand(instruct);
+      }
+
+      let failureCount = 0;
+      if (isRetryTrackedAgentAction(instruct)) {
+        if (result.success) {
+          actionFailureCounts.delete(actionSignature);
+        } else if (result.errorType === 'retry_limit_reached') {
+          failureCount = priorFailureCount;
+        } else {
+          failureCount = priorFailureCount + 1;
+          actionFailureCounts.set(actionSignature, failureCount);
+          if (failureCount >= AGENT_MAX_ACTION_RETRIES) {
+            blockedReason = `${formatAgentCommand(instruct)} is blocked after ${AGENT_MAX_ACTION_RETRIES} failed attempts. Last error: ${result.error || 'Unknown error.'}`;
+            blockedActions.set(actionSignature, blockedReason);
+          }
+        }
+      }
+
+      const executionLogEntry = buildExecutionLogEntry(stepCount, instruct, result, {
+        failureCount,
+        blockedReason
+      });
+      executionHistoryLog = executionHistoryLog
+        ? `${executionHistoryLog}\n\n${executionLogEntry}`
+        : executionLogEntry;
+      lastExecutionFeedback = executionLogEntry;
+
+      if (!result.success) {
+        cmdDiv.innerHTML += ` <span style="color:#ff6b6b;">✗ ${result.error}</span>`;
+      } else {
+        cmdDiv.innerHTML += ` <span style="color:#4ade80;">✓</span>`;
+      }
       scrollToBottom();
     }
 
-    // ── 6. Show the command being executed ──
-    const instruct = parsed.instruct;
-    if (!instruct || !instruct.type) {
-      appendAIMessage('Agent returned invalid command. Stopping.', { className: 'message ai' });
-      agentRunning = false;
-      break;
-    }
-
-    const cmdDiv = document.createElement('div');
-    cmdDiv.className = 'message ai agent-command';
-    cmdDiv.innerHTML = `<span class="agent-cmd-icon">⚡</span> <strong>Step ${stepCount}:</strong> ${instruct.description || instruct.type}`;
-    chatContainer.appendChild(cmdDiv);
-    scrollToBottom();
-
-    // ── 7. Check if done ──
-    if (instruct.type === 'done') {
-      const doneText = instruct.description || 'Goal completed.';
-      appendAIMessage(doneText, { stream: true });
-      // Feed agent result back into shared conversation history so normal chat remembers it
-      conversationHistory.push({ role: 'assistant', content: `[Agent completed] Goal: ${refinedGoal}\nResult: ${doneText}` });
+    if (stepCount >= AGENT_MAX_STEPS) {
+      const maxMsg = `Agent reached the maximum of ${AGENT_MAX_STEPS} steps. Stopping.`;
+      appendAIMessage(maxMsg, { className: 'message ai' });
+      conversationHistory.push({ role: 'assistant', content: `[Agent stopped - max steps] Goal: ${refinedGoal}\nStopped after ${stepCount} steps.` });
       chrome.storage.local.set({ conversationHistory });
-      agentRunning = false;
-      break;
     }
-
-    // ── 8. Execute the command with retry guards ──
-    const actionSignature = getAgentActionSignature(instruct);
-    const priorFailureCount = isRetryTrackedAgentAction(instruct)
-      ? (actionFailureCounts.get(actionSignature) || 0)
-      : 0;
-
-    let blockedReason = blockedActions.get(actionSignature) || null;
-    let result;
-
-    if (isRetryTrackedAgentAction(instruct) && priorFailureCount >= AGENT_MAX_ACTION_RETRIES) {
-      blockedReason = blockedReason || `${formatAgentCommand(instruct)} is blocked after ${AGENT_MAX_ACTION_RETRIES} failed attempts. Choose a different selector or approach.`;
-      blockedActions.set(actionSignature, blockedReason);
-      result = {
-        success: false,
-        errorType: 'retry_limit_reached',
-        error: blockedReason
-      };
-    } else {
-      result = await executeAgentCommand(instruct);
-    }
-
-    let failureCount = 0;
-    if (isRetryTrackedAgentAction(instruct)) {
-      if (result.success) {
-        actionFailureCounts.delete(actionSignature);
-      } else if (result.errorType === 'retry_limit_reached') {
-        failureCount = priorFailureCount;
-      } else {
-        failureCount = priorFailureCount + 1;
-        actionFailureCounts.set(actionSignature, failureCount);
-        if (failureCount >= AGENT_MAX_ACTION_RETRIES) {
-          blockedReason = `${formatAgentCommand(instruct)} is blocked after ${AGENT_MAX_ACTION_RETRIES} failed attempts. Last error: ${result.error || 'Unknown error.'}`;
-          blockedActions.set(actionSignature, blockedReason);
-        }
-      }
-    }
-
-    const executionLogEntry = buildExecutionLogEntry(stepCount, instruct, result, {
-      failureCount,
-      blockedReason
-    });
-    executionHistoryLog = executionHistoryLog
-      ? `${executionHistoryLog}\n\n${executionLogEntry}`
-      : executionLogEntry;
-    lastExecutionFeedback = executionLogEntry;
-
-    if (!result.success) {
-      cmdDiv.innerHTML += ` <span style="color:#ff6b6b;">✗ ${result.error}</span>`;
-    } else {
-      cmdDiv.innerHTML += ` <span style="color:#4ade80;">✓</span>`;
-    }
-    scrollToBottom();
+  } finally {
+    activeAgentThinkingEl = null;
+    agentRunning = false;
+    currentAbortController = null;
+    hideAgentRunningUI();
+    await updateAgentPageOverlay({ active: false });
   }
-
-  if (stepCount >= AGENT_MAX_STEPS) {
-    const maxMsg = `Agent reached the maximum of ${AGENT_MAX_STEPS} steps. Stopping.`;
-    appendAIMessage(maxMsg, { className: 'message ai' });
-    conversationHistory.push({ role: 'assistant', content: `[Agent stopped - max steps] Goal: ${refinedGoal}\nStopped after ${stepCount} steps.` });
-    chrome.storage.local.set({ conversationHistory });
-  }
-
-  activeAgentThinkingEl = null;
-  agentRunning = false;
-  hideAgentRunningUI();
 }
 
 function streamText(fullText, container, signal) {
