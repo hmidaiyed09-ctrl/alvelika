@@ -780,7 +780,7 @@ CRITICAL INSTRUCTIONS:
 //  AGENT MODE — Autonomous JSON Agent
 // ═══════════════════════════════════════════════════════════
 
-// ─── Page Scraper — extracts interactive elements + page text ───
+// ─── Page Scraper — builds Accessibility Tree + page text ───
 async function scrapePageForAgent() {
   const result = { pageTitle: '', pageUrl: '', pageText: '', elements: '', screenshot: null };
 
@@ -798,62 +798,6 @@ async function scrapePageForAgent() {
     const injectionResults = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: () => {
-        // ── Selector Generator ──
-        function getSelector(el, index) {
-          const tag = el.tagName.toLowerCase();
-
-          // For links, always use href contains-match (most reliable)
-          if (tag === 'a' && el.getAttribute('href')) {
-            let rawHref = el.getAttribute('href');
-            rawHref = rawHref.split('&pp=')[0].split('&feature=')[0].split('&si=')[0].split('&list=')[0];
-            if (rawHref.length > 70) rawHref = rawHref.substring(0, 70);
-            const sel = `a[href*="${rawHref}"]`;
-            if (document.querySelectorAll(sel).length === 1) return sel;
-            // Not unique — use nth-of-type among matching hrefs
-            const all = Array.from(document.querySelectorAll(sel));
-            const nthIndex = all.indexOf(el) + 1;
-            return `a[href*="${rawHref}"]:nth-of-type(${nthIndex})`;
-          }
-
-          // Unique ID
-          if (el.id && document.querySelectorAll(`#${CSS.escape(el.id)}`).length === 1) {
-            return `#${CSS.escape(el.id)}`;
-          }
-
-          // Non-unique ID — use nth match
-          if (el.id) {
-            const all = Array.from(document.querySelectorAll(`[id="${el.id}"]`));
-            const nthIndex = all.indexOf(el) + 1;
-            if (nthIndex === 1) return `#${CSS.escape(el.id)}`;
-            return `[id="${el.id}"]:nth-of-type(${nthIndex})`;
-          }
-
-          if (el.name) return `${tag}[name="${el.name}"]`;
-          if (el.getAttribute('aria-label')) {
-            const sel = `${tag}[aria-label="${el.getAttribute('aria-label')}"]`;
-            if (document.querySelectorAll(sel).length === 1) return sel;
-          }
-          if (el.placeholder) return `${tag}[placeholder="${el.placeholder}"]`;
-          if (el.title) return `${tag}[title="${el.title}"]`;
-
-          if (el.className && typeof el.className === 'string' && el.className.trim()) {
-            const classes = el.className.trim().split(/\s+/).slice(0, 3).map(c => `.${CSS.escape(c)}`).join('');
-            const sel = `${tag}${classes}`;
-            if (document.querySelectorAll(sel).length === 1) return sel;
-          }
-
-          const parent = el.parentElement;
-          if (parent) {
-            const siblings = Array.from(parent.children).filter(c => c.tagName === el.tagName);
-            if (siblings.length > 1) {
-              const idx = siblings.indexOf(el) + 1;
-              const parentSel = parent.id ? `#${CSS.escape(parent.id)}` : parent.tagName.toLowerCase();
-              return `${parentSel} > ${tag}:nth-of-type(${idx})`;
-            }
-          }
-          return `${tag}:nth-of-type(${index + 1})`;
-        }
-
         // ── Ad Detection ──
         const adSelectors = [
           'ytd-ad-slot-renderer', 'ytd-promoted-sparkles-web-renderer',
@@ -869,92 +813,274 @@ async function scrapePageForAgent() {
         ];
         const adContainers = new Set();
         adSelectors.forEach(sel => {
-          try {
-            document.querySelectorAll(sel).forEach(ad => adContainers.add(ad));
-          } catch(e) {}
+          try { document.querySelectorAll(sel).forEach(ad => adContainers.add(ad)); } catch(e) {}
         });
-        // Also detect by text content "Sponsored" or "Ad" badges
         document.querySelectorAll('[class*="badge"], [class*="label"], span, div').forEach(el => {
           const txt = (el.textContent || '').trim().toLowerCase();
           if ((txt === 'ad' || txt === 'ads' || txt === 'sponsored' || txt === 'advertisement') && el.offsetHeight > 0) {
-            // Mark the closest major parent as ad
             const adParent = el.closest('ytd-video-renderer, ytd-reel-shelf-renderer, [class*="renderer"], article, section, li, div[class]');
             if (adParent) adContainers.add(adParent);
           }
         });
-
         function isInsideAd(el) {
-          for (const ad of adContainers) {
-            if (ad.contains(el)) return true;
-          }
+          for (const ad of adContainers) { if (ad.contains(el)) return true; }
           return false;
         }
 
-        // ── Collect & categorize ──
-        const inputs = [];
-        const buttons = [];
-        const links = [];
-
-        const interactiveQuery = 'input:not([type="hidden"]), textarea, select, button, [role="button"], a[href], [role="link"], [role="tab"], [contenteditable="true"]';
-        const allElements = document.querySelectorAll(interactiveQuery);
-        let globalIndex = 0;
-
-        allElements.forEach((el) => {
-          const rect = el.getBoundingClientRect();
-          if (rect.width === 0 && rect.height === 0) return;
-          // Skip elements inside ad containers
-          if (isInsideAd(el)) return;
-
+        // ── Selector Generator ──
+        function getSelector(el) {
           const tag = el.tagName.toLowerCase();
-          const text = (el.textContent || '').trim().substring(0, 80);
-          const selector = getSelector(el, globalIndex);
-          globalIndex++;
-
-          let attrs = [];
-          if (el.id) attrs.push(`id="${el.id}"`);
-          if (el.name) attrs.push(`name="${el.name}"`);
-          if (el.type) attrs.push(`type="${el.type}"`);
-          if (el.placeholder) attrs.push(`placeholder="${el.placeholder}"`);
-          if (el.value) attrs.push(`value="${el.value.substring(0, 40)}"`);
           if (tag === 'a' && el.getAttribute('href')) {
             let rawHref = el.getAttribute('href');
-            rawHref = rawHref.split('&pp=')[0].split('&feature=')[0].split('&si=')[0];
-            if (rawHref.length > 80) rawHref = rawHref.substring(0, 80);
-            attrs.push(`href="${rawHref}"`);
+            rawHref = rawHref.split('&pp=')[0].split('&feature=')[0].split('&si=')[0].split('&list=')[0];
+            if (rawHref.length > 70) rawHref = rawHref.substring(0, 70);
+            const sel = `a[href*="${rawHref}"]`;
+            if (document.querySelectorAll(sel).length === 1) return sel;
+            const all = Array.from(document.querySelectorAll(sel));
+            const nthIndex = all.indexOf(el) + 1;
+            return `a[href*="${rawHref}"]:nth-of-type(${nthIndex})`;
           }
-          if (el.getAttribute('aria-label')) attrs.push(`aria-label="${el.getAttribute('aria-label')}"`);
-          if (el.title) attrs.push(`title="${el.title}"`);
+          if (el.id && document.querySelectorAll(`#${CSS.escape(el.id)}`).length === 1) return `#${CSS.escape(el.id)}`;
+          if (el.id) {
+            const all = Array.from(document.querySelectorAll(`[id="${el.id}"]`));
+            const nthIndex = all.indexOf(el) + 1;
+            if (nthIndex === 1) return `#${CSS.escape(el.id)}`;
+            return `[id="${el.id}"]:nth-of-type(${nthIndex})`;
+          }
+          if (el.name) return `${tag}[name="${el.name}"]`;
+          if (el.getAttribute('aria-label')) {
+            const sel = `${tag}[aria-label="${el.getAttribute('aria-label')}"]`;
+            if (document.querySelectorAll(sel).length === 1) return sel;
+          }
+          if (el.placeholder) return `${tag}[placeholder="${el.placeholder}"]`;
+          if (el.title) return `${tag}[title="${el.title}"]`;
+          if (el.className && typeof el.className === 'string' && el.className.trim()) {
+            const classes = el.className.trim().split(/\s+/).slice(0, 3).map(c => `.${CSS.escape(c)}`).join('');
+            const sel = `${tag}${classes}`;
+            if (document.querySelectorAll(sel).length === 1) return sel;
+          }
+          const parent = el.parentElement;
+          if (parent) {
+            const siblings = Array.from(parent.children).filter(c => c.tagName === el.tagName);
+            if (siblings.length > 1) {
+              const idx = siblings.indexOf(el) + 1;
+              const parentSel = parent.id ? `#${CSS.escape(parent.id)}` : parent.tagName.toLowerCase();
+              return `${parentSel} > ${tag}:nth-of-type(${idx})`;
+            }
+          }
+          return tag;
+        }
 
-          const line = `<${tag} ${attrs.join(' ')}> ${text ? `"${text}"` : '(no text)'}\n     ✅ SELECTOR: ${selector}`;
+        // ── Compute accessible role ──
+        function getRole(el) {
+          try { if (el.computedRole) return el.computedRole; } catch(e) {}
+          const explicit = el.getAttribute('role');
+          if (explicit) return explicit;
+          const tag = el.tagName.toLowerCase();
+          const roleMap = {
+            a: 'link', button: 'button', input: 'textbox', textarea: 'textbox',
+            select: 'combobox', img: 'img', nav: 'navigation', main: 'main',
+            header: 'banner', footer: 'contentinfo', aside: 'complementary',
+            form: 'form', dialog: 'dialog', table: 'table', ul: 'list',
+            ol: 'list', li: 'listitem', h1: 'heading', h2: 'heading',
+            h3: 'heading', h4: 'heading', h5: 'heading', h6: 'heading',
+            section: 'region', details: 'group', summary: 'button',
+          };
+          if (tag === 'input') {
+            const t = (el.type || 'text').toLowerCase();
+            if (t === 'checkbox') return 'checkbox';
+            if (t === 'radio') return 'radio';
+            if (t === 'submit' || t === 'button' || t === 'reset') return 'button';
+            if (t === 'search') return 'searchbox';
+            return 'textbox';
+          }
+          return roleMap[tag] || null;
+        }
 
+        // ── Compute accessible name ──
+        function getName(el) {
+          try { if (el.computedName) return el.computedName; } catch(e) {}
+          const ariaLabel = el.getAttribute('aria-label');
+          if (ariaLabel) return ariaLabel;
+          const labelledBy = el.getAttribute('aria-labelledby');
+          if (labelledBy) {
+            const parts = labelledBy.split(/\s+/).map(id => {
+              const ref = document.getElementById(id);
+              return ref ? ref.textContent.trim() : '';
+            }).filter(Boolean);
+            if (parts.length) return parts.join(' ');
+          }
+          const tag = el.tagName.toLowerCase();
           if (tag === 'input' || tag === 'textarea' || tag === 'select') {
-            inputs.push(line);
-          } else if (tag === 'button' || el.getAttribute('role') === 'button') {
-            if (buttons.length < 25) buttons.push(line);
-          } else if (tag === 'a') {
-            if (links.length < 40) links.push(line);
-          } else {
-            if (buttons.length < 25) buttons.push(line);
+            if (el.id) {
+              const label = document.querySelector(`label[for="${el.id}"]`);
+              if (label) return label.textContent.trim();
+            }
+            if (el.placeholder) return el.placeholder;
+            if (el.title) return el.title;
           }
+          if (tag === 'img') return el.alt || el.title || '';
+          if (tag === 'a' || tag === 'button') {
+            return (el.textContent || '').trim().substring(0, 80);
+          }
+          return '';
+        }
+
+        // ── Detect modal/dialog focus traps ──
+        let focusContext = '';
+        const openModal = document.querySelector(
+          'dialog[open], [role="dialog"][aria-modal="true"], [role="alertdialog"], ' +
+          '[class*="modal"][style*="display: block"], [class*="modal"][style*="visibility: visible"], ' +
+          '[class*="modal"]:not([style*="display: none"]):not([style*="visibility: hidden"]):not(.hidden)'
+        );
+        if (openModal) {
+          const modalName = openModal.getAttribute('aria-label') ||
+            openModal.querySelector('h1, h2, h3, [class*="title"]')?.textContent?.trim() || 'Unnamed';
+          focusContext = `[FOCUS TRAP: Modal "${modalName.substring(0, 60)}" is open. Interactive elements below are scoped to this modal.]\n\n`;
+        }
+
+        // ── Collect elements recursively (pierces open Shadow DOMs) ──
+        const interactiveQuery = 'input:not([type="hidden"]), textarea, select, button, [role="button"], ' +
+          'a[href], [role="link"], [role="tab"], [role="menuitem"], [role="option"], [role="switch"], ' +
+          '[role="checkbox"], [role="radio"], [contenteditable="true"]';
+
+        function collectInteractive(root, collected) {
+          root.querySelectorAll(interactiveQuery).forEach(el => collected.add(el));
+          root.querySelectorAll('*').forEach(el => {
+            if (el.shadowRoot) collectInteractive(el.shadowRoot, collected);
+          });
+        }
+
+        // ── Detect fake interactive elements (div soup) ──
+        const semanticInteractive = new Set(['a','button','input','textarea','select','summary','details']);
+        function collectFakeInteractive(root, collected, seen) {
+          root.querySelectorAll('div, span, li, td, label, section').forEach(el => {
+            if (seen.has(el)) return;
+            const tag = el.tagName.toLowerCase();
+            if (semanticInteractive.has(tag)) return;
+            if (el.getAttribute('role')) return; // already has ARIA role, caught by main query
+            const rect = el.getBoundingClientRect();
+            if (rect.width === 0 && rect.height === 0) return;
+            const hasPointer = getComputedStyle(el).cursor === 'pointer';
+            const hasOnclick = el.hasAttribute('onclick');
+            const hasTabindex = el.hasAttribute('tabindex') && el.getAttribute('tabindex') !== '-1';
+            if (hasPointer || hasOnclick || hasTabindex) {
+              // Skip if a semantic interactive child exists (it's just a wrapper)
+              if (el.querySelector('a, button, input, textarea, select, [role="button"], [role="link"]')) return;
+              collected.add(el);
+            }
+          });
+          root.querySelectorAll('*').forEach(el => {
+            if (el.shadowRoot) collectFakeInteractive(el.shadowRoot, collected, seen);
+          });
+        }
+
+        // ── Build A11y Tree ──
+        const searchRoot = openModal || document;
+        const interactiveSet = new Set();
+        collectInteractive(searchRoot, interactiveSet);
+
+        const fakeSet = new Set();
+        collectFakeInteractive(searchRoot, fakeSet, interactiveSet);
+
+        const tree = [];
+        let nodeId = 1;
+
+        function processElement(el, isFake) {
+          const rect = el.getBoundingClientRect();
+          if (rect.width === 0 && rect.height === 0) return;
+          if (isInsideAd(el)) return;
+
+          let role = getRole(el);
+          if (!role && isFake) role = 'clickable';
+          if (!role) return;
+
+          const name = getName(el) || (isFake ? (el.textContent || '').trim().substring(0, 80) : '');
+          const selector = getSelector(el);
+          const tag = el.tagName.toLowerCase();
+
+          const states = [];
+          if (el.disabled) states.push('disabled');
+          if (el.checked) states.push('checked');
+          if (el.getAttribute('aria-expanded') === 'true') states.push('expanded');
+          if (el.getAttribute('aria-expanded') === 'false') states.push('collapsed');
+          if (el.getAttribute('aria-selected') === 'true') states.push('selected');
+          if (el.getAttribute('aria-pressed') === 'true') states.push('pressed');
+          if (el.required) states.push('required');
+          if (document.activeElement === el) states.push('focused');
+          if (isFake) states.push('implicit');
+
+          let value = '';
+          if (tag === 'input' || tag === 'textarea' || tag === 'select') {
+            value = (el.value || '').substring(0, 40);
+          }
+
+          let line = `[${nodeId}] ${role}`;
+          if (name) line += ` "${name.substring(0, 80)}"`;
+          if (value) line += ` value="${value}"`;
+          if (states.length) line += ` (${states.join(', ')})`;
+          line += `  ← ${selector}`;
+
+          tree.push(line);
+          nodeId++;
+        }
+
+        interactiveSet.forEach(el => processElement(el, false));
+        fakeSet.forEach(el => processElement(el, true));
+
+        // ── Landmarks for structural context ──
+        const landmarks = [];
+        const landmarkEls = document.querySelectorAll('main, nav, [role="main"], [role="navigation"], [role="search"], [role="banner"], [role="contentinfo"], [role="complementary"], [role="region"][aria-label]');
+        landmarkEls.forEach(el => {
+          const role = getRole(el) || el.tagName.toLowerCase();
+          const name = el.getAttribute('aria-label') || '';
+          landmarks.push(name ? `${role} "${name}"` : role);
         });
 
-        // ── Build categorized output ──
-        let output = '';
-        if (inputs.length > 0) {
-          output += '── INPUTS & FIELDS ──\n';
-          inputs.forEach((line, i) => { output += `[I${i + 1}] ${line}\n`; });
-        }
-        if (buttons.length > 0) {
-          output += '\n── BUTTONS ──\n';
-          buttons.forEach((line, i) => { output += `[B${i + 1}] ${line}\n`; });
-        }
-        if (links.length > 0) {
-          output += '\n── LINKS ──\n';
-          links.forEach((line, i) => { output += `[L${i + 1}] ${line}\n`; });
-        }
+        // ── Visual Black Boxes (canvas, svg, video) ──
+        const blackBoxes = [];
+        document.querySelectorAll('canvas, svg, video, embed, object').forEach((el, i) => {
+          const rect = el.getBoundingClientRect();
+          if (rect.width < 20 || rect.height < 20) return; // skip tiny/icon-sized
+          if (isInsideAd(el)) return;
+          const tag = el.tagName.toLowerCase();
+          const label = el.getAttribute('aria-label') || el.getAttribute('title') || '';
+          blackBoxes.push(
+            `[V${i + 1}] ${tag}${label ? ` "${label}"` : ''} bounds=[${Math.round(rect.left)},${Math.round(rect.top)},${Math.round(rect.width)}x${Math.round(rect.height)}]`
+          );
+        });
+
+        // ── Walled Gardens (iframes) ──
+        const iframes = [];
+        document.querySelectorAll('iframe').forEach((el, i) => {
+          const rect = el.getBoundingClientRect();
+          if (rect.width === 0 && rect.height === 0) return;
+          if (isInsideAd(el)) return;
+          const src = (el.src || '').substring(0, 120);
+          const label = el.getAttribute('aria-label') || el.getAttribute('title') || '';
+          iframes.push(
+            `[F${i + 1}] iframe${label ? ` "${label}"` : ''}${src ? ` src="${src}"` : ''} bounds=[${Math.round(rect.left)},${Math.round(rect.top)},${Math.round(rect.width)}x${Math.round(rect.height)}]`
+          );
+        });
 
         const mainContent = document.querySelector('main') || document.querySelector('article') || document.body;
         const pageText = (mainContent.innerText || '').substring(0, 5000);
+
+        let output = '';
+        if (focusContext) output += focusContext;
+        if (landmarks.length > 0) {
+          output += '── PAGE LANDMARKS ──\n' + landmarks.join(', ') + '\n\n';
+        }
+        output += '── ACCESSIBILITY TREE (interactive elements) ──\n';
+        output += tree.length > 0 ? tree.join('\n') : '(no interactive elements found)';
+        if (blackBoxes.length > 0) {
+          output += '\n\n── VISUAL BLACK BOXES (no DOM inside — use screenshot to interpret) ──\n';
+          output += blackBoxes.join('\n');
+        }
+        if (iframes.length > 0) {
+          output += '\n\n── WALLED GARDENS (iframes — content may be inaccessible) ──\n';
+          output += iframes.join('\n');
+        }
 
         return {
           title: document.title,
@@ -989,7 +1115,7 @@ async function scrapePageForAgent() {
 // Step 0 — Analyze the user's raw prompt and produce a clear goal
 function buildGoalAnalysisPrompt() {
   return `You are Alvelika Agent. The user just gave you a task.
-You receive the DOM and screenshot of the current page.
+You receive the accessibility tree and screenshot of the current page.
 You may also receive the user's PREVIOUS MESSAGES (conversation history) for context.
 If the screenshot contains an Alvelika mauve activity overlay, glowing frame, or status card, ignore it. That overlay belongs to the extension, not the website.
 
@@ -1025,7 +1151,11 @@ function buildAgentSystemPrompt(userGoal, executionHistoryLog, executionFeedback
 
 You receive these inputs every step:
 - SCREENSHOT: The source of truth. What you SEE is what exists. If the target is visible, act on it.
-- INTERACTIVE ELEMENTS: A categorized list of clickable/typeable elements with ready-to-use selectors (marked with ✅ SELECTOR). Use these selectors.
+- ACCESSIBILITY TREE: A structured list of interactive elements on the page. Each node shows: [id] role "name" (states) ← CSS_SELECTOR. Use the CSS selector after the ← arrow for actions. Elements marked "(implicit)" are non-semantic elements (divs/spans) that behave as buttons — they are clickable.
+- PAGE LANDMARKS: Structural regions of the page (navigation, main, search, etc.) for orientation.
+- FOCUS TRAP: If a modal/dialog is open, elements are scoped to that modal. The tree only shows what is currently actionable.
+- VISUAL BLACK BOXES: Elements like <canvas>, <svg>, <video> that have no internal DOM. You cannot click inside them with selectors — use the screenshot to understand their content. If the target is inside a black box, describe what you see and use coordinates from the bounding box info.
+- WALLED GARDENS: Iframes detected on the page. Their internal content may be inaccessible. If your target is inside an iframe, note it in your thinking.
 - PAGE TEXT: The visible text content of the page.
 - If you see an Alvelika mauve overlay, glowing frame, or status card in the screenshot, ignore it. It is the agent's own activity layer, not part of the page.
 
@@ -1034,13 +1164,17 @@ ${historyBlock}${feedbackBlock}
 
 ═══ DECISION POLICY (follow strictly) ═══
 
-1. IF the target is clearly visible in the screenshot AND a matching selector exists in the elements list → CLICK IT NOW. Do not scroll, do not re-analyze.
-2. IF the target is visible but no perfect selector exists → use the CLOSEST matching selector. Prefer: parent container selectors, href-contains selectors, or aria-label selectors.
+1. IF the target is clearly visible in the screenshot AND a matching node exists in the A11y tree → CLICK IT NOW. Do not scroll, do not re-analyze.
+2. IF the target is visible but no perfect match exists → use the CLOSEST matching node. Match by role and name (e.g., find a link whose name matches the text you see).
 3. IF there are ads/sponsored items → SKIP them. Click the first REAL result.
 4. NEVER scroll more than 2 times for the same sub-goal. After 2 scrolls, you MUST attempt a click with the best available selector.
 5. The "type" command auto-focuses the element. Do NOT click an input before typing — just use "type" directly.
 6. READ the real browser feedback carefully before choosing the next action. Use exact errors to self-correct.
 7. Act IMMEDIATELY when confidence is high and risk is low. Analysis is support, not the goal.
+8. Use element STATES to understand the page: if a checkbox is "checked", a menu is "expanded", or a button is "disabled", factor that into your decision.
+9. IMPLICIT ELEMENTS: Nodes marked "(implicit)" are non-standard clickable elements (e.g., a <div> styled as a button). They work with normal "click" commands — treat them like regular buttons.
+10. BLACK BOXES: If your target is inside a canvas/svg/video (listed in VISUAL BLACK BOXES), you cannot click sub-elements. Look at the screenshot to understand the content. Describe what you see in your thinking.
+11. IFRAMES: If your target appears to be inside an iframe (listed in WALLED GARDENS), note it. You can still try clicking elements visible in the main DOM near the iframe boundary.
 
 ═══ SELF-CORRECTION / RETRY RULES ═══
 
@@ -1049,7 +1183,7 @@ ${historyBlock}${feedbackBlock}
 - NEVER repeat the exact same selector after an invalid selector failure.
 - After 3 failed attempts for the same exact action, that action is blocked.
 - If an action is listed in BLOCKED ACTIONS, do not repeat it. You MUST choose a different selector or a different action.
-- After repeated failures, prefer a different selector strategy: use another selector from the ✅ SELECTOR list, a broader parent container, a safer aria-label selector, or a different command.
+- After repeated failures, prefer a different selector strategy: pick another node from the A11y tree with a similar role/name, use a broader parent container, or a different command.
 
 ═══ FIRST QUESTION (answer BEFORE deciding any action) ═══
 
@@ -1069,8 +1203,8 @@ Before choosing an action, you MUST answer:
     "action_reason": "Brief: why this action, and why not an alternative? (skip if goal achieved)"
   },
   "instruct": {
-    "type": "navigate | click | type | scroll | wait | done",
-    "selector": "CSS selector from the ✅ SELECTOR list",
+    "type": "navigate | click | type | copy | paste | scroll | wait | done",
+    "selector": "CSS selector from the ← column in the A11y tree",
     "url": "URL (only for navigate)",
     "value": "text to type (only for type), or up/down (only for scroll)",
     "description": "short description of this action"
@@ -1080,17 +1214,18 @@ Before choosing an action, you MUST answer:
 
 ═══ SELECTOR RULES ═══
 
-- COPY selectors exactly from the ✅ SELECTOR lines in the elements list.
-- If the exact element isn't listed, use a RELATIVE selector strategy:
-  Example: the first video result on YouTube → use the first thumbnail link or title link from the LINKS section.
-- For links, prefer href-contains selectors: a[href*="/watch?v=..."]
-- NEVER invent selectors from memory. The elements list is the truth.
+- COPY selectors exactly from the ← column in the accessibility tree nodes.
+- Match elements by their ROLE and NAME. Example: to click a search button, find a node like [5] button "Search" ← #search-btn and use #search-btn.
+- For links, the selector will typically be href-contains: a[href*="/watch?v=..."]
+- NEVER invent selectors from memory. The accessibility tree is the truth.
 
 ═══ COMMANDS ═══
 
 - "navigate": Go to a URL. Requires "url".
 - "click": Click an element. Requires "selector".
 - "type": Type into input/textarea. Requires "selector" and "value".
+- "copy": Select and copy specific text from the page. Requires "value" (the exact word or phrase to find and select). Optional "selector" to limit the search to a specific element. The text is precisely selected word-by-word and copied to clipboard. Returns the copied text.
+- "paste": Paste text into the currently focused or specified element. Requires "selector" and "value" (text to paste). Uses insertText for compatibility with rich editors (Google Docs, etc.).
 - "scroll": Scroll page. Requires "value": "down" or "up".
 - "wait": Wait for page update (use sparingly).
 - "done": Goal complete. Put final answer in "description".
@@ -1262,6 +1397,139 @@ async function executeAgentCommand(instruct) {
     }
   }
 
+  // COPY — precisely select and copy specific text from the page
+  if (type === 'copy') {
+    try {
+      const results = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: (selector, textToFind) => {
+          if (!textToFind) return { success: false, error: 'No text specified to copy.' };
+
+          const root = selector ? document.querySelector(selector) : document.body;
+          if (!root) return { success: false, errorType: 'element_not_found', error: `Element not found: ${selector}` };
+
+          // Walk all text nodes to find the exact phrase
+          const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+          const needle = textToFind;
+          let found = false;
+
+          // Strategy 1: single text node contains the phrase
+          const node = walker.currentNode;
+          let current;
+          while ((current = walker.nextNode())) {
+            const idx = current.textContent.indexOf(needle);
+            if (idx !== -1) {
+              const range = document.createRange();
+              range.setStart(current, idx);
+              range.setEnd(current, idx + needle.length);
+              const sel = window.getSelection();
+              sel.removeAllRanges();
+              sel.addRange(range);
+              found = true;
+              break;
+            }
+          }
+
+          // Strategy 2: phrase spans multiple adjacent text nodes
+          if (!found) {
+            const walker2 = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+            const nodes = [];
+            let n;
+            while ((n = walker2.nextNode())) nodes.push(n);
+
+            // Build concatenated text with node boundaries
+            let concat = '';
+            const map = []; // { node, localOffset, globalStart }
+            for (const tn of nodes) {
+              const start = concat.length;
+              concat += tn.textContent;
+              map.push({ node: tn, localOffset: 0, globalStart: start });
+            }
+
+            const gIdx = concat.indexOf(needle);
+            if (gIdx !== -1) {
+              const gEnd = gIdx + needle.length;
+              // Find start node
+              let startNode, startOffset, endNode, endOffset;
+              for (const m of map) {
+                const mEnd = m.globalStart + m.node.textContent.length;
+                if (!startNode && gIdx >= m.globalStart && gIdx < mEnd) {
+                  startNode = m.node;
+                  startOffset = gIdx - m.globalStart;
+                }
+                if (gEnd > m.globalStart && gEnd <= mEnd) {
+                  endNode = m.node;
+                  endOffset = gEnd - m.globalStart;
+                  break;
+                }
+              }
+              if (startNode && endNode) {
+                const range = document.createRange();
+                range.setStart(startNode, startOffset);
+                range.setEnd(endNode, endOffset);
+                const sel = window.getSelection();
+                sel.removeAllRanges();
+                sel.addRange(range);
+                found = true;
+              }
+            }
+          }
+
+          if (!found) return { success: false, error: `Text not found on page: "${needle}"` };
+
+          // Copy the selection to clipboard
+          const selectedText = window.getSelection().toString();
+          document.execCommand('copy');
+          return { success: true, description: `Copied: "${selectedText}"`, copiedText: selectedText };
+        },
+        args: [instruct.selector || null, instruct.value]
+      });
+      await delay(500);
+      return results[0].result;
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  }
+
+  // PASTE — paste text into an element (works with rich editors)
+  if (type === 'paste') {
+    try {
+      const results = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: (selector, value) => {
+          let el = null;
+          try {
+            el = document.querySelector(selector);
+          } catch (err) {
+            return { success: false, errorType: 'invalid_selector_syntax', error: err instanceof Error ? err.message : String(err) };
+          }
+          if (!el) return { success: false, errorType: 'element_not_found', error: `Element not found: ${selector}` };
+
+          el.focus();
+
+          // Try insertText first (works with contenteditable and rich editors)
+          const inserted = document.execCommand('insertText', false, value);
+          if (inserted) return { success: true, description: `Pasted "${value}" into ${selector}` };
+
+          // Fallback: set value directly (standard inputs/textareas)
+          if ('value' in el) {
+            el.value = value;
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            return { success: true, description: `Pasted "${value}" into ${selector}` };
+          }
+
+          return { success: false, error: 'Could not paste into element.' };
+        },
+        args: [instruct.selector, instruct.value]
+      });
+      await delay(500);
+      return results[0].result;
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  }
+
   // SCROLL — scroll the page up or down
   if (type === 'scroll') {
     try {
@@ -1306,8 +1574,11 @@ function getAgentActionSignature(instruct = {}) {
   const type = normalizeAgentValue(instruct.type).toLowerCase();
   if (!type) return 'unknown';
 
-  if (type === 'click' || type === 'type') {
+  if (type === 'click' || type === 'type' || type === 'paste') {
     return `${type}:${normalizeAgentValue(instruct.selector)}`;
+  }
+  if (type === 'copy') {
+    return `${type}:${normalizeAgentValue(instruct.value)}`;
   }
   if (type === 'navigate') {
     return `${type}:${normalizeAgentValue(instruct.url)}`;
@@ -1321,7 +1592,7 @@ function getAgentActionSignature(instruct = {}) {
 }
 
 function isRetryTrackedAgentAction(instruct = {}) {
-  return ['click', 'type', 'navigate', 'scroll'].includes(normalizeAgentValue(instruct.type).toLowerCase());
+  return ['click', 'type', 'navigate', 'scroll', 'copy', 'paste'].includes(normalizeAgentValue(instruct.type).toLowerCase());
 }
 
 function detectSelectorRepairHint(selector = '') {
@@ -1628,7 +1899,7 @@ async function handleAgentSend(userGoal) {
       );
       const systemPrompt = buildAgentSystemPrompt(refinedGoal, executionHistoryLog, executionFeedbackBlock);
       const userContent = [
-        { type: 'text', text: `Current page title: ${page.pageTitle}\nCurrent page URL: ${page.pageUrl}\n\nINTERACTIVE ELEMENTS:\n${page.elements}\n\nPAGE TEXT:\n${page.pageText}` }
+        { type: 'text', text: `Current page title: ${page.pageTitle}\nCurrent page URL: ${page.pageUrl}\n\n${page.elements}\n\nPAGE TEXT:\n${page.pageText}` }
       ];
       if (page.screenshot) {
         userContent.push({ type: 'image_url', image_url: { url: page.screenshot, detail: 'low' } });
