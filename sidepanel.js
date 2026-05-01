@@ -1112,6 +1112,27 @@ async function scrapePageForAgent() {
   return result;
 }
 
+// ─── Agent v2 — clear any leftover SoM badges from the page ───
+async function clearAgentBadges() {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab || !tab.id) return;
+    if (tab.url && (tab.url.startsWith('chrome://') || tab.url.startsWith('edge://') || tab.url.startsWith('about:'))) return;
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => {
+        const badge = document.getElementById('__alvelika_badge_overlay__');
+        if (badge) badge.remove();
+        if (window.__alvelika && window.__alvelika.idMap) {
+          window.__alvelika.idMap.clear();
+        }
+      }
+    });
+  } catch (err) {
+    console.log('Could not clear badges:', err);
+  }
+}
+
 // ─── Agent v2 — Set-of-Mark screenshot (numbered badges on visible interactive elements) ───
 async function captureAgentScreenshot() {
   const result = { pageTitle: '', pageUrl: '', screenshot: null, idCount: 0 };
@@ -1684,6 +1705,11 @@ async function executeAgentCommandById(instruct) {
           if (!el) return { success: false, errorType: 'id_not_found', error: `No element bound to id ${badgeId}.` };
           if (!el.isConnected) return { success: false, errorType: 'stale_element', error: `Element for id ${badgeId} is detached.` };
           try { el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch (e) {}
+          el.focus();
+          el.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, cancelable: true, view: window }));
+          el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+          el.dispatchEvent(new MouseEvent('pointerup', { bubbles: true, cancelable: true, view: window }));
+          el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
           el.click();
           return { success: true, description: `Clicked id ${badgeId}` };
         },
@@ -1905,6 +1931,12 @@ async function executeAgentCommand(instruct) {
           }
 
           if (!el) return { success: false, errorType: 'element_not_found', error: `Element not found: ${selector}` };
+          try { el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch (e) {}
+          el.focus();
+          el.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, cancelable: true, view: window }));
+          el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+          el.dispatchEvent(new MouseEvent('pointerup', { bubbles: true, cancelable: true, view: window }));
+          el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
           el.click();
           return { success: true, description: `Clicked: ${selector}` };
         },
@@ -2715,6 +2747,7 @@ async function handleAgentSend(userGoal) {
     currentAbortController = null;
     hideAgentRunningUI();
     await updateAgentPageOverlay({ active: false });
+    await clearAgentBadges();
 
     // Restore normal chat UI
     hideAgentRunningView();
