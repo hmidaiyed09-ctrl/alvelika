@@ -1112,6 +1112,273 @@ async function scrapePageForAgent() {
   return result;
 }
 
+// ─── Agent v2 — Set-of-Mark screenshot (numbered badges on visible interactive elements) ───
+async function captureAgentScreenshot() {
+  const result = { pageTitle: '', pageUrl: '', screenshot: null, idCount: 0 };
+
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab || !tab.id) return result;
+
+    if (tab.url && (tab.url.startsWith('chrome://') || tab.url.startsWith('edge://') || tab.url.startsWith('about:'))) {
+      result.pageTitle = tab.title || '';
+      result.pageUrl = tab.url;
+      return result;
+    }
+
+    // 1. Hide Alvelika overlay + draw numbered badges on visible interactive elements
+    const labelResults = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => {
+        // Hide Alvelika activity overlay so it doesn't bleed into the screenshot
+        const overlayHost = document.querySelector('[data-alvelika-agent-overlay-host]');
+        if (overlayHost) overlayHost.style.display = 'none';
+
+        // Cleanup any leftover badge overlay
+        const oldBadgeOverlay = document.getElementById('__alvelika_badge_overlay__');
+        if (oldBadgeOverlay) oldBadgeOverlay.remove();
+
+        // ── Ad detection (skip ad widgets) ──
+        const adSelectors = [
+          'ytd-ad-slot-renderer', 'ytd-promoted-sparkles-web-renderer',
+          'ytd-promoted-video-renderer', 'ytd-display-ad-renderer',
+          '.ad-container', '.ad-slot', '.ad-banner',
+          '[data-ad]', '[data-ad-slot]', '[id^="google_ads"]',
+          '[id^="div-gpt-ad"]', 'ins.adsbygoogle', '[aria-label*="advertisement"]',
+          'iframe[src*="doubleclick"]', 'iframe[src*="googlesyndication"]'
+        ];
+        const adContainers = new Set();
+        adSelectors.forEach(sel => {
+          try { document.querySelectorAll(sel).forEach(ad => adContainers.add(ad)); } catch (e) {}
+        });
+        const isInsideAd = (el) => {
+          for (const ad of adContainers) { if (ad.contains(el)) return true; }
+          return false;
+        };
+
+        // ── Collect interactive elements (semantic + fake/div-soup) ──
+        const interactiveQuery =
+          'input:not([type="hidden"]), textarea, select, button, [role="button"], ' +
+          'a[href], [role="link"], [role="tab"], [role="menuitem"], [role="option"], ' +
+          '[role="switch"], [role="checkbox"], [role="radio"], [contenteditable="true"], ' +
+          '[role="combobox"], [role="searchbox"], [role="textbox"]';
+
+        const interactiveSet = new Set();
+        function collectInteractive(root) {
+          root.querySelectorAll(interactiveQuery).forEach(el => interactiveSet.add(el));
+          root.querySelectorAll('*').forEach(el => {
+            if (el.shadowRoot) collectInteractive(el.shadowRoot);
+          });
+        }
+        collectInteractive(document);
+
+        const semanticInteractive = new Set(['a', 'button', 'input', 'textarea', 'select', 'summary', 'details']);
+        document.querySelectorAll('div, span, li, td, label, section').forEach(el => {
+          if (interactiveSet.has(el)) return;
+          if (semanticInteractive.has(el.tagName.toLowerCase())) return;
+          if (el.getAttribute('role')) return;
+          const rect = el.getBoundingClientRect();
+          if (rect.width === 0 && rect.height === 0) return;
+          const cs = getComputedStyle(el);
+          const hasPointer = cs.cursor === 'pointer';
+          const hasOnclick = el.hasAttribute('onclick');
+          const hasTabindex = el.hasAttribute('tabindex') && el.getAttribute('tabindex') !== '-1';
+          if (hasPointer || hasOnclick || hasTabindex) {
+            if (el.querySelector('a, button, input, textarea, select, [role="button"], [role="link"]')) return;
+            interactiveSet.add(el);
+          }
+        });
+
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+
+        // Filter to viewport-visible & not hidden & not disabled
+        let visible = [];
+        interactiveSet.forEach(el => {
+          if (isInsideAd(el)) return;
+          const rect = el.getBoundingClientRect();
+          if (rect.width === 0 || rect.height === 0) return;
+          // Skip elements too small to read a badge on
+          if (rect.width < 12 || rect.height < 12) return;
+          if (rect.bottom < 0 || rect.top > vh || rect.right < 0 || rect.left > vw) return;
+          const cs = getComputedStyle(el);
+          if (cs.visibility === 'hidden' || cs.display === 'none' || cs.opacity === '0') return;
+          if (el.disabled) return;
+          visible.push({ el, rect });
+        });
+
+        // ── DEDUP 1: skip ancestor wrappers when a descendant is also interactive ──
+        // (e.g., <a><button>...</button></a> — keep only the leaf button)
+        const visibleSet = new Set(visible.map(v => v.el));
+        visible = visible.filter(v => {
+          for (const other of visibleSet) {
+            if (other === v.el) continue;
+            if (v.el.contains(other) && other !== v.el) return false; // I am an ancestor of another interactive → drop me
+          }
+          return true;
+        });
+
+        // ── DEDUP 2: collapse near-identical bounding rects (keep smallest area) ──
+        const RECT_TOL = 4;
+        function rectsClose(a, b) {
+          return Math.abs(a.left - b.left) <= RECT_TOL &&
+                 Math.abs(a.top - b.top) <= RECT_TOL &&
+                 Math.abs(a.right - b.right) <= RECT_TOL &&
+                 Math.abs(a.bottom - b.bottom) <= RECT_TOL;
+        }
+        const dedupedByRect = [];
+        for (const v of visible) {
+          const dup = dedupedByRect.find(d => rectsClose(d.rect, v.rect));
+          if (dup) {
+            // Keep the one with smaller area (more specific)
+            const aArea = dup.rect.width * dup.rect.height;
+            const bArea = v.rect.width * v.rect.height;
+            if (bArea < aArea) {
+              const idx = dedupedByRect.indexOf(dup);
+              dedupedByRect[idx] = v;
+            }
+          } else {
+            dedupedByRect.push(v);
+          }
+        }
+        visible = dedupedByRect;
+
+        // Sort reading order (top-to-bottom, left-to-right with row tolerance)
+        visible.sort((a, b) => {
+          const ay = Math.round(a.rect.top / 20);
+          const by = Math.round(b.rect.top / 20);
+          if (ay !== by) return ay - by;
+          return a.rect.left - b.rect.left;
+        });
+
+        const capped = visible.slice(0, 150);
+
+        // Build id map (lives on window in extension's isolated world; persists across executeScript calls)
+        if (!window.__alvelika) window.__alvelika = {};
+        window.__alvelika.idMap = new Map();
+
+        // Build overlay
+        const overlay = document.createElement('div');
+        overlay.id = '__alvelika_badge_overlay__';
+        overlay.style.cssText =
+          'position:fixed;top:0;left:0;width:100%;height:100%;' +
+          'pointer-events:none;z-index:2147483646;';
+
+        const BADGE_SIZE = 16;
+        const COLLISION_DIST = 20;
+        const placed = []; // {x, y} centers
+
+        function isFree(cx, cy) {
+          for (const p of placed) {
+            const dx = p.x - cx, dy = p.y - cy;
+            if (dx * dx + dy * dy < COLLISION_DIST * COLLISION_DIST) return false;
+          }
+          return true;
+        }
+        function clamp(x, lo, hi) { return Math.max(lo, Math.min(hi, x)); }
+
+        capped.forEach((item, idx) => {
+          const id = idx + 1;
+          window.__alvelika.idMap.set(id, item.el);
+
+          const r = item.rect;
+          const half = BADGE_SIZE / 2;
+          const ecx = (r.left + r.right) / 2;
+          const ecy = (r.top + r.bottom) / 2;
+
+          // 4 candidate centers, INSIDE the element (so the badge fully sits on top of the element)
+          const corners = (r.width >= BADGE_SIZE && r.height >= BADGE_SIZE)
+            ? [
+                { x: r.left + half + 1,  y: r.top + half + 1 },     // inside top-left
+                { x: r.right - half - 1, y: r.top + half + 1 },     // inside top-right
+                { x: r.left + half + 1,  y: r.bottom - half - 1 },  // inside bottom-left
+                { x: r.right - half - 1, y: r.bottom - half - 1 },  // inside bottom-right
+                { x: ecx, y: ecy }                                  // center (fallback)
+              ]
+            : [
+                // Element too small to fit badge inside → center it on the element
+                { x: ecx, y: ecy }
+              ];
+
+          let placedAt = null;
+          for (const c of corners) {
+            const cx = clamp(c.x, half, vw - half);
+            const cy = clamp(c.y, half, vh - half);
+            if (isFree(cx, cy)) { placedAt = { x: cx, y: cy, leader: false }; break; }
+          }
+
+          // Last resort: just put it at element center (no leader line — keep visuals clean)
+          if (!placedAt) {
+            placedAt = {
+              x: clamp(ecx, half, vw - half),
+              y: clamp(ecy, half, vh - half),
+              leader: false
+            };
+          }
+          placed.push({ x: placedAt.x, y: placedAt.y });
+
+          const badge = document.createElement('div');
+          badge.textContent = String(id);
+          badge.style.cssText =
+            'position:absolute;' +
+            'left:' + (placedAt.x - BADGE_SIZE / 2) + 'px;' +
+            'top:' + (placedAt.y - BADGE_SIZE / 2) + 'px;' +
+            'width:' + BADGE_SIZE + 'px;height:' + BADGE_SIZE + 'px;' +
+            'border-radius:50%;background:#ff2d55;color:#fff;' +
+            'font:700 10px/' + (BADGE_SIZE - 2) + 'px "Segoe UI",system-ui,sans-serif;' +
+            'text-align:center;border:1px solid #fff;' +
+            'box-shadow:0 0 3px rgba(0,0,0,0.6);box-sizing:border-box;';
+          overlay.appendChild(badge);
+        });
+
+        document.documentElement.appendChild(overlay);
+
+        return {
+          title: document.title,
+          url: window.location.href,
+          idCount: capped.length
+        };
+      }
+    });
+
+    if (labelResults && labelResults[0] && labelResults[0].result) {
+      result.pageTitle = labelResults[0].result.title;
+      result.pageUrl = labelResults[0].result.url;
+      result.idCount = labelResults[0].result.idCount;
+    }
+
+    // 2. Wait for paint
+    await delay(180);
+
+    // 3. Capture screenshot (badges visible, Alvelika overlay hidden)
+    try {
+      const res = await chrome.runtime.sendMessage({ action: 'captureScreen' });
+      if (res && res.screenshot) result.screenshot = res.screenshot;
+    } catch (err) {
+      console.log('Could not capture screenshot:', err);
+    }
+
+    // 4. Restore Alvelika overlay — KEEP badges visible for debugging.
+    //    They'll be cleared automatically at the start of the next captureAgentScreenshot call.
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: () => {
+          const overlayHost = document.querySelector('[data-alvelika-agent-overlay-host]');
+          if (overlayHost) overlayHost.style.display = '';
+        }
+      });
+    } catch (err) {
+      console.log('Could not restore Alvelika overlay:', err);
+    }
+
+  } catch (err) {
+    console.log('Could not capture labeled screenshot:', err);
+  }
+
+  return result;
+}
+
 // Step 0 — Analyze the user's raw prompt and produce a clear goal
 function buildGoalAnalysisPrompt() {
   return `You are Alvelika Agent. The user just gave you a task.
@@ -1119,7 +1386,7 @@ You receive the accessibility tree and screenshot of the current page.
 You may also receive the user's PREVIOUS MESSAGES (conversation history) for context.
 If the screenshot contains an Alvelika mauve activity overlay, glowing frame, or status card, ignore it. That overlay belongs to the extension, not the website.
 
-Your job is to ANALYZE the user's request and produce a clear, precise goal.
+Your job is to ANALYZE the user's request, ASSESS its feasibility, and produce a clear, precise goal.
 Use the conversation history to understand references like "do that again", "now search for the other one", "continue", etc.
 
 YOUR RESPONSE MUST BE PURE JSON:
@@ -1129,16 +1396,26 @@ YOUR RESPONSE MUST BE PURE JSON:
     "what_user_said": "What did the user literally ask for?",
     "what_user_wants": "What is the user truly trying to achieve? What information or outcome do they want?",
     "key_details": "What specific details did the user mention that I must follow exactly? (e.g., specific website, specific query, specific action)",
-    "history_context": "What relevant context from previous messages helps clarify this request? (write 'N/A' if no history or not relevant)"
+    "history_context": "What relevant context from previous messages helps clarify this request? (write 'N/A' if no history or not relevant)",
+    "feasibility": "Is this task actually achievable using a browser? Consider: Does this website/app support this action? Is there a known limitation? For example: downloading source code from a hosting platform that doesn't expose source files, accessing admin features without credentials, or performing actions that require desktop software. Rate: FEASIBLE, UNCERTAIN, or INFEASIBLE.",
+    "alternative_if_infeasible": "If INFEASIBLE or UNCERTAIN, what is the closest achievable alternative the user might accept? If FEASIBLE, write 'N/A'."
   },
-  "user_goal": "A clear, precise, step-by-step rewrite of the user's goal. Be specific. Include every constraint the user mentioned. Resolve any references to previous messages."
+  "feasibility": "FEASIBLE | UNCERTAIN | INFEASIBLE",
+  "infeasible_reason": "Only if INFEASIBLE: a clear, honest explanation of WHY this cannot be done and what the user should do instead. Otherwise null.",
+  "user_goal": "A clear, precise, step-by-step rewrite of the user's goal. Be specific. Include every constraint the user mentioned. Resolve any references to previous messages. If INFEASIBLE, rewrite the goal as the closest achievable alternative OR leave empty."
 }
 
 RULES:
 1. If the user mentioned a specific website (e.g., Google), that is a hard constraint — do NOT use a different website.
 2. Rewrite the goal so it cannot be misunderstood.
 3. If the user's request references previous messages (e.g., "do it again", "the same thing"), use the conversation history to resolve what they mean.
-4. Respond with PURE JSON only. No wrapping, no code fences, no extra text.`;
+4. FEASIBILITY IS CRITICAL. Do NOT attempt tasks that are impossible. Examples of INFEASIBLE tasks:
+   - Downloading source files from a platform that only serves built/deployed output (e.g., Netlify manual deploys, Vercel static deploys)
+   - Accessing private data without authentication
+   - Performing actions that require native OS capabilities (file system access, installing software)
+   - Interacting with pages behind login walls when not logged in
+5. If a task is INFEASIBLE, it is better to tell the user honestly than to waste steps clicking around aimlessly.
+6. Respond with PURE JSON only. No wrapping, no code fences, no extra text.`;
 }
 
 function buildAgentSystemPrompt(userGoal, executionHistoryLog, executionFeedbackBlock) {
@@ -1185,6 +1462,16 @@ ${historyBlock}${feedbackBlock}
 - If an action is listed in BLOCKED ACTIONS, do not repeat it. You MUST choose a different selector or a different action.
 - After repeated failures, prefer a different selector strategy: pick another node from the A11y tree with a similar role/name, use a broader parent container, or a different command.
 
+═══ LOOP DETECTION & IMPOSSIBILITY RULES ═══
+
+- You receive a VISITED URLS section showing every URL you have been on and how many times.
+- If you see the SAME URL appearing 2+ times, you are LOOPING. You MUST either:
+  a) Try a completely different approach (different navigation path, different element), OR
+  b) Conclude the task is IMPOSSIBLE and use "done" with type "impossible" to explain why.
+- If you have spent 3+ steps without making meaningful progress toward the goal, STOP and honestly tell the user the task cannot be completed, explaining WHY.
+- NEVER keep clicking around hoping to find something that doesn't exist. If a feature/button/link is not in the accessibility tree and not visible in the screenshot, it DOES NOT EXIST on this page.
+- It is FAR BETTER to say "This task is not possible because [reason]" than to waste the user's time looping.
+
 ═══ FIRST QUESTION (answer BEFORE deciding any action) ═══
 
 Before choosing an action, you MUST answer:
@@ -1192,21 +1479,28 @@ Before choosing an action, you MUST answer:
   - Compare the current state against the goal. If the goal was "click the first video" and you are now ON a video page → the goal IS achieved.
   - If YES → immediately respond with instruct type "done". Do NOT repeat previous actions.
   - If NO → explain briefly what is still missing, then decide the next action.
+  "loop_check": Am I going in circles? Have I visited this URL before? Am I repeating actions that already failed?
+  - If YES → you MUST change strategy or declare the task impossible.
+  "feasibility_check": Based on everything I can see on this page, is the remaining goal actually achievable?
+  - If the UI simply does not offer the feature/button/action the user needs, the answer is NO.
+  - If NO → use "done" with a clear explanation of why it cannot be done and what the user should do instead.
 
 ═══ RESPONSE FORMAT (pure JSON, nothing else) ═══
 
 {
   "thinking": {
     "goal_check": "Is the goal already achieved? YES or NO, and why?",
+    "loop_check": "Am I looping or stuck? Have I been on this URL before? YES or NO.",
+    "feasibility_check": "Is the remaining goal achievable from this page? YES, UNCERTAIN, or NO — and why?",
     "state": "Brief: what page am I on, did the last command work?",
-    "target": "Brief: what element do I need to interact with next? (skip if goal achieved)",
-    "action_reason": "Brief: why this action, and why not an alternative? (skip if goal achieved)"
+    "target": "Brief: what element do I need to interact with next? (skip if goal achieved or impossible)",
+    "action_reason": "Brief: why this action, and why not an alternative? (skip if goal achieved or impossible)"
   },
   "instruct": {
-    "type": "navigate | click | type | copy | paste | scroll | wait | done",
+    "type": "navigate | click | type | pressKey | copy | paste | scroll | wait | done",
     "selector": "CSS selector from the ← column in the A11y tree",
     "url": "URL (only for navigate)",
-    "value": "text to type (only for type), or up/down (only for scroll)",
+    "value": "text to type (only for type), key name (only for pressKey: Enter, Escape, Tab, ArrowDown, ArrowUp, Backspace, Space), or up/down (only for scroll)",
     "description": "short description of this action"
   },
   "validateOption": "Full history of all steps including this one. Mark each ✓ or ✗."
@@ -1223,19 +1517,277 @@ Before choosing an action, you MUST answer:
 
 - "navigate": Go to a URL. Requires "url".
 - "click": Click an element. Requires "selector".
-- "type": Type into input/textarea. Requires "selector" and "value".
+- "type": Type into input/textarea. Requires "selector" and "value". Does NOT press Enter — use "pressKey" after if needed.
+- "pressKey": Press a keyboard key. Requires "value" (key name: Enter, Escape, Tab, ArrowDown, ArrowUp, Backspace, Space). Optional "selector" to target a specific element (otherwise uses the currently focused element). Use this after "type" to submit forms, or to press Escape to close modals.
 - "copy": Select and copy specific text from the page. Requires "value" (the exact word or phrase to find and select). Optional "selector" to limit the search to a specific element. The text is precisely selected word-by-word and copied to clipboard. Returns the copied text.
 - "paste": Paste text into the currently focused or specified element. Requires "selector" and "value" (text to paste). Uses insertText for compatibility with rich editors (Google Docs, etc.).
 - "scroll": Scroll page. Requires "value": "down" or "up".
 - "wait": Wait for page update (use sparingly).
-- "done": Goal complete. Put final answer in "description".
+- "done": Goal complete OR goal impossible. Put final answer/explanation in "description". If the goal was impossible, start description with "IMPOSSIBLE:" followed by a clear, honest explanation.
 
 ═══ CRITICAL ═══
 
 - Your primary job is to COMPLETE the goal, not to maximize explanation.
 - Keep "thinking" SHORT (1-2 sentences each). Long analysis = wasted time.
 - If the target is visible and the action is obvious, just do it.
+- If the goal is IMPOSSIBLE, say so immediately. Do NOT loop.
 - Respond with PURE JSON only. No markdown, no code fences, no extra text.`;
+}
+
+// ─── Agent v2 — system prompt (Set-of-Mark, three-object response) ───
+function buildAgentSystemPromptV2(userGoal, whyHistory, lastFeedback, blockedActions) {
+  const historyBlock = whyHistory && whyHistory.length
+    ? '\n\nDECISION HISTORY (your past justifications, oldest first):\n' +
+      whyHistory.map((w, i) => `Step ${i + 1}: ${w}`).join('\n')
+    : '\n\nDECISION HISTORY:\nThis is the first step. No previous decisions.';
+
+  const feedbackBlock = lastFeedback
+    ? '\n\nLAST EXECUTION FEEDBACK (from the browser, ground truth):\n' + lastFeedback
+    : '\n\nLAST EXECUTION FEEDBACK:\nNo command has been executed yet.';
+
+  const blockedBlock = blockedActions && blockedActions.length
+    ? '\n\nBLOCKED ACTIONS (do not repeat — pick a different id or action):\n' +
+      blockedActions.map((b, i) => `${i + 1}. ${b}`).join('\n')
+    : '';
+
+  return `You are Alvelika Agent — an autonomous AI that ACTS on web pages.
+
+You receive ONLY:
+- A SCREENSHOT of the current viewport. Every clickable / typeable element has a SMALL RED CIRCULAR BADGE drawn directly ON the element, showing an integer id. The badge always sits on top of the element it labels — never floating in empty space.
+- The USER GOAL.
+- Your previous DECISION HISTORY.
+- The LAST EXECUTION FEEDBACK from the browser.
+
+You do NOT receive HTML, CSS selectors, accessibility text, or page text. The screenshot IS the source of truth.
+
+USER GOAL: "${userGoal}"
+${historyBlock}${feedbackBlock}${blockedBlock}
+
+═══ HOW IT WORKS ═══
+
+To act on an element, return its badge id. The program owns a map { id → element } and will execute the action on the element bound to that id. You never write a CSS selector.
+
+═══ RESPONSE FORMAT (PURE JSON, three top-level keys, in this exact order) ═══
+
+{
+  "thinking": {
+    "goal_achieved":     "Is the user's goal already fully achieved? YES or NO, and why.",
+    "previous_action":   "Did the previous action succeed (produce the effect I expected)? YES or NO, and why. Say N/A on the first step.",
+    "screen_is_on_path": "Is this current screen the one that leads me to the goal? YES or NO, and why.",
+    "target_choice":     "Given the user's goal, which badge id should I pick and why?",
+    "action_choice":     "What is the best action type for that target and why?"
+  },
+  "direct_response": {
+    "action": "click | type | pressKey | scroll | navigate | wait | done",
+    "id":     <integer badge id from the screenshot — required for click / type; optional for pressKey; omit for scroll / navigate / wait / done>,
+    "value":  "<text to type | key name (Enter, Escape, Tab, ArrowDown, ArrowUp, ArrowLeft, ArrowRight, Backspace, Space, Delete) | 'up' or 'down' for scroll | URL for navigate | final answer or 'IMPOSSIBLE: <reason>' for done>"
+  },
+  "why_this_choice": "Free-form one-paragraph explanation of WHY you picked this exact id+action over the alternatives. This is saved and shown back to you next step, so be precise — write it for your future self."
+}
+
+═══ COMMANDS ═══
+
+- "click":     Click the element bound to "id".
+- "type":      Type "value" into the input bound to "id". Auto-focuses. Does NOT press Enter, does NOT submit.
+- "pressKey":  Press a key. "value" = key name. Optional "id" to focus before pressing.
+- "scroll":    "value" = "up" or "down". No id.
+- "navigate":  "value" = URL. No id.
+- "wait":      Pause for the page to settle. Use sparingly.
+- "done":      Goal complete OR impossible. Put final answer / explanation in "value". Prefix with "IMPOSSIBLE: " if impossible.
+
+═══ RULES ═══
+
+1. NEVER invent an id that is not visible as a red badge on the screenshot.
+2. If two badges are too close to read clearly, scroll or pick the one whose badge you can clearly identify.
+3. If the goal is achieved, immediately respond with action "done".
+4. After 2 scrolls without progress, MUST attempt a click on the best available badge.
+5. If the LAST EXECUTION FEEDBACK shows the previous action failed, pick a DIFFERENT id — do NOT repeat the same id.
+6. Reply with PURE JSON only — no markdown fences, no extra text before or after the JSON.
+
+═══ TYPING & SEARCH (CRITICAL — read this twice) ═══
+
+7. The "type" command ONLY puts text into the input. It does NOT submit the form, does NOT trigger the search, does NOT navigate.
+8. After ANY "type" into a search box / form input, your VERY NEXT step MUST be:
+     { "action": "pressKey", "value": "Enter", "id": <same id you typed into> }
+   Do NOT click a magnifier icon, do NOT click "Search", do NOT click anything else first. Pressing Enter is the only reliable submit.
+9. If you previously typed a query but the page still shows the home/recommended content (not a results list), it means you forgot Enter. Press Enter NOW with the same input id — do NOT re-type, do NOT re-click the search box.
+10. Only click a video / link AFTER the page clearly shows a search-results list for your query. If the page still looks like a home page with mixed recommendations, the search has NOT been performed yet.`;
+}
+
+// ─── Agent v2 — execute by badge id (uses window.__alvelika.idMap on the page) ───
+async function executeAgentCommandById(instruct) {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab || !tab.id) return { success: false, error: 'No active tab found.' };
+
+  const action = String(instruct.action || '').toLowerCase();
+
+  if (action === 'done') return { success: true, done: true, description: instruct.value || 'Done.' };
+
+  if (action === 'wait') {
+    await delay(2000);
+    return { success: true, description: 'Waited for page to update.' };
+  }
+
+  if (action === 'navigate') {
+    const url = instruct.url || instruct.value;
+    if (!url) return { success: false, error: 'navigate requires a URL in "value".' };
+    try {
+      await chrome.tabs.update(tab.id, { url });
+      let loaded = false;
+      const loadPromise = new Promise((resolve) => {
+        const timeout = setTimeout(() => { chrome.tabs.onUpdated.removeListener(listener); resolve(); }, 8000);
+        function listener(tabId, changeInfo) {
+          if (tabId === tab.id && changeInfo.status === 'complete') {
+            loaded = true;
+            clearTimeout(timeout);
+            chrome.tabs.onUpdated.removeListener(listener);
+            resolve();
+          }
+        }
+        chrome.tabs.onUpdated.addListener(listener);
+      });
+      await delay(2000);
+      if (!loaded) await loadPromise;
+      return { success: true, description: `Navigated to ${url}` };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  }
+
+  if (action === 'scroll') {
+    const direction = String(instruct.value || 'down').toLowerCase();
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: (dir) => {
+          window.scrollBy({ top: dir === 'up' ? -500 : 500, behavior: 'smooth' });
+        },
+        args: [direction]
+      });
+      await delay(600);
+      return { success: true, description: `Scrolled ${direction}` };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  }
+
+  if (action === 'click') {
+    const id = Number(instruct.id);
+    if (!Number.isInteger(id) || id < 1) return { success: false, error: `Invalid id: ${instruct.id}` };
+    try {
+      const results = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: (badgeId) => {
+          const map = (window.__alvelika && window.__alvelika.idMap) || null;
+          if (!map) return { success: false, errorType: 'no_id_map', error: 'Badge map missing — page may have reloaded.' };
+          const el = map.get(badgeId);
+          if (!el) return { success: false, errorType: 'id_not_found', error: `No element bound to id ${badgeId}.` };
+          if (!el.isConnected) return { success: false, errorType: 'stale_element', error: `Element for id ${badgeId} is detached.` };
+          try { el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch (e) {}
+          el.click();
+          return { success: true, description: `Clicked id ${badgeId}` };
+        },
+        args: [id]
+      });
+      await delay(2000);
+      return results[0].result;
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  }
+
+  if (action === 'type') {
+    const id = Number(instruct.id);
+    if (!Number.isInteger(id) || id < 1) return { success: false, error: `Invalid id: ${instruct.id}` };
+    try {
+      const results = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: (badgeId, value) => {
+          const map = (window.__alvelika && window.__alvelika.idMap) || null;
+          if (!map) return { success: false, errorType: 'no_id_map', error: 'Badge map missing.' };
+          const el = map.get(badgeId);
+          if (!el) return { success: false, errorType: 'id_not_found', error: `No element bound to id ${badgeId}.` };
+          if (!el.isConnected) return { success: false, errorType: 'stale_element', error: `Element for id ${badgeId} is detached.` };
+          el.focus();
+          if ('value' in el && el.tagName && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) {
+            el.value = value;
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+          } else if (el.isContentEditable) {
+            const inserted = document.execCommand('insertText', false, value);
+            if (!inserted) el.textContent = value;
+          } else {
+            return { success: false, error: `Element id ${badgeId} is not a text input.` };
+          }
+          return { success: true, description: `Typed "${value}" into id ${badgeId}` };
+        },
+        args: [id, String(instruct.value || '')]
+      });
+      await delay(500);
+      return results[0].result;
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  }
+
+  if (action === 'presskey') {
+    try {
+      const results = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: (badgeId, keyName) => {
+          const keyMap = {
+            'Enter': { key: 'Enter', code: 'Enter', keyCode: 13 },
+            'Escape': { key: 'Escape', code: 'Escape', keyCode: 27 },
+            'Tab': { key: 'Tab', code: 'Tab', keyCode: 9 },
+            'ArrowDown': { key: 'ArrowDown', code: 'ArrowDown', keyCode: 40 },
+            'ArrowUp': { key: 'ArrowUp', code: 'ArrowUp', keyCode: 38 },
+            'ArrowLeft': { key: 'ArrowLeft', code: 'ArrowLeft', keyCode: 37 },
+            'ArrowRight': { key: 'ArrowRight', code: 'ArrowRight', keyCode: 39 },
+            'Backspace': { key: 'Backspace', code: 'Backspace', keyCode: 8 },
+            'Space': { key: ' ', code: 'Space', keyCode: 32 },
+            'Delete': { key: 'Delete', code: 'Delete', keyCode: 46 }
+          };
+          const keyInfo = keyMap[keyName];
+          if (!keyInfo) return { success: false, error: `Unknown key: ${keyName}` };
+
+          let target = document.activeElement || document.body;
+          if (badgeId !== null && badgeId !== undefined) {
+            const map = (window.__alvelika && window.__alvelika.idMap) || null;
+            if (map) {
+              const el = map.get(badgeId);
+              if (el && el.isConnected) { el.focus(); target = el; }
+            }
+          }
+
+          const eventInit = {
+            key: keyInfo.key, code: keyInfo.code, keyCode: keyInfo.keyCode,
+            which: keyInfo.keyCode, bubbles: true, cancelable: true
+          };
+          target.dispatchEvent(new KeyboardEvent('keydown', eventInit));
+          target.dispatchEvent(new KeyboardEvent('keypress', eventInit));
+          target.dispatchEvent(new KeyboardEvent('keyup', eventInit));
+
+          if (keyName === 'Enter' && target.tagName && target.tagName.toLowerCase() === 'input') {
+            const form = target.closest('form');
+            if (form) {
+              const submitBtn = form.querySelector('[type="submit"], button:not([type="button"])');
+              if (submitBtn) submitBtn.click();
+              else if (form.requestSubmit) form.requestSubmit();
+              else form.submit();
+            }
+          }
+          return { success: true, description: `Pressed ${keyName}${badgeId ? ` on id ${badgeId}` : ''}` };
+        },
+        args: [instruct.id != null ? Number(instruct.id) : null, instruct.value]
+      });
+      await delay(1500);
+      return results[0].result;
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  }
+
+  return { success: false, error: `Unknown action: ${action}` };
 }
 
 // ─── Command Executor — takes instruct JSON, executes on page ───
@@ -1549,6 +2101,80 @@ async function executeAgentCommand(instruct) {
     }
   }
 
+  // PRESSKEY — press a keyboard key (Enter, Escape, Tab, etc.)
+  if (type === 'pressKey') {
+    try {
+      const results = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: (selector, keyName) => {
+          // Map common key names to KeyboardEvent properties
+          const keyMap = {
+            'Enter': { key: 'Enter', code: 'Enter', keyCode: 13 },
+            'Escape': { key: 'Escape', code: 'Escape', keyCode: 27 },
+            'Tab': { key: 'Tab', code: 'Tab', keyCode: 9 },
+            'ArrowDown': { key: 'ArrowDown', code: 'ArrowDown', keyCode: 40 },
+            'ArrowUp': { key: 'ArrowUp', code: 'ArrowUp', keyCode: 38 },
+            'ArrowLeft': { key: 'ArrowLeft', code: 'ArrowLeft', keyCode: 37 },
+            'ArrowRight': { key: 'ArrowRight', code: 'ArrowRight', keyCode: 39 },
+            'Backspace': { key: 'Backspace', code: 'Backspace', keyCode: 8 },
+            'Space': { key: ' ', code: 'Space', keyCode: 32 },
+            'Delete': { key: 'Delete', code: 'Delete', keyCode: 46 }
+          };
+
+          const keyInfo = keyMap[keyName];
+          if (!keyInfo) return { success: false, error: `Unknown key: ${keyName}. Supported: ${Object.keys(keyMap).join(', ')}` };
+
+          let target = document.activeElement || document.body;
+          if (selector) {
+            try {
+              const el = document.querySelector(selector);
+              if (el) {
+                el.focus();
+                target = el;
+              }
+            } catch (err) {
+              return { success: false, errorType: 'invalid_selector_syntax', error: err.message };
+            }
+          }
+
+          const eventInit = {
+            key: keyInfo.key,
+            code: keyInfo.code,
+            keyCode: keyInfo.keyCode,
+            which: keyInfo.keyCode,
+            bubbles: true,
+            cancelable: true
+          };
+
+          target.dispatchEvent(new KeyboardEvent('keydown', eventInit));
+          target.dispatchEvent(new KeyboardEvent('keypress', eventInit));
+          target.dispatchEvent(new KeyboardEvent('keyup', eventInit));
+
+          // Special handling: if Enter is pressed on an input inside a form, submit the form
+          if (keyName === 'Enter' && target.tagName && target.tagName.toLowerCase() === 'input') {
+            const form = target.closest('form');
+            if (form) {
+              // Try native submit
+              const submitBtn = form.querySelector('[type="submit"], button:not([type="button"])');
+              if (submitBtn) {
+                submitBtn.click();
+              } else {
+                form.requestSubmit ? form.requestSubmit() : form.submit();
+              }
+            }
+          }
+
+          return { success: true, description: `Pressed ${keyName}${selector ? ` on ${selector}` : ''}` };
+        },
+        args: [instruct.selector || null, instruct.value]
+      });
+      await delay(1500);
+      return results[0].result;
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  }
+
   return { success: false, error: `Unknown command type: ${type}` };
 }
 
@@ -1592,7 +2218,7 @@ function getAgentActionSignature(instruct = {}) {
 }
 
 function isRetryTrackedAgentAction(instruct = {}) {
-  return ['click', 'type', 'navigate', 'scroll', 'copy', 'paste'].includes(normalizeAgentValue(instruct.type).toLowerCase());
+  return ['click', 'type', 'navigate', 'scroll', 'copy', 'paste', 'pressKey'].includes(normalizeAgentValue(instruct.type).toLowerCase());
 }
 
 function detectSelectorRepairHint(selector = '') {
@@ -1867,11 +2493,14 @@ async function handleAgentSend(userGoal) {
 
     if (!agentRunning) return;
 
-    // ═══ AGENT LOOP ═══
-    let executionHistoryLog = null;
-    let lastExecutionFeedback = 'No previous command has been executed yet.';
+    // ═══ AGENT LOOP v2 (Set-of-Mark — screenshot only, no JS content) ═══
+    const whyHistory = []; // array of "why_this_choice" strings, one per step
+    let lastFeedback = null;
     const actionFailureCounts = new Map();
     const blockedActions = new Map();
+    const visitedUrls = new Map();
+    let stepsWithoutProgress = 0;
+    let lastPageUrl = '';
     let stepCount = 0;
 
     while (agentRunning && stepCount < AGENT_MAX_STEPS) {
@@ -1879,33 +2508,57 @@ async function handleAgentSend(userGoal) {
       await updateAgentPageOverlay({
         active: true,
         title: 'Alvelika Agent is working',
-        detail: `Step ${stepCount}: analyzing the page and planning the next move.`,
-        step: `Step ${stepCount} • analyzing`
+        detail: `Step ${stepCount}: labeling the page and planning the next move.`,
+        step: `Step ${stepCount} • labeling`
       });
 
       // ── Show thinking state ──
-      const thinkingEl = createThinkingState(`Step ${stepCount} — Analyzing the page…`);
+      const thinkingEl = createThinkingState(`Step ${stepCount} — Labeling buttons & analyzing…`);
       activeAgentThinkingEl = thinkingEl;
       chatContainer.appendChild(thinkingEl);
       scrollToBottom();
 
-      // ── 1. Scrape the page ──
-      const page = await scrapePageForAgent();
+      // ── 1. Capture labeled screenshot (badges drawn on page) ──
+      const page = await captureAgentScreenshot();
 
-      // ── 2. Build messages ──
-      const executionFeedbackBlock = buildExecutionFeedbackBlock(
-        lastExecutionFeedback,
-        Array.from(blockedActions.values())
-      );
-      const systemPrompt = buildAgentSystemPrompt(refinedGoal, executionHistoryLog, executionFeedbackBlock);
-      const userContent = [
-        { type: 'text', text: `Current page title: ${page.pageTitle}\nCurrent page URL: ${page.pageUrl}\n\n${page.elements}\n\nPAGE TEXT:\n${page.pageText}` }
-      ];
-      if (page.screenshot) {
-        userContent.push({ type: 'image_url', image_url: { url: page.screenshot, detail: 'low' } });
+      // ── 1.5 Loop detection ──
+      const currentUrl = page.pageUrl || '';
+      const normalizedUrl = currentUrl.split('?')[0].split('#')[0];
+      visitedUrls.set(normalizedUrl, (visitedUrls.get(normalizedUrl) || 0) + 1);
+      if (normalizedUrl === lastPageUrl) stepsWithoutProgress++;
+      else { stepsWithoutProgress = 0; lastPageUrl = normalizedUrl; }
+
+      let loopWarning = '';
+      const visitsForCurrentUrl = visitedUrls.get(normalizedUrl) || 0;
+      if (visitsForCurrentUrl >= 3) {
+        loopWarning = `\n\n⚠️ SEVERE LOOP DETECTED: You have visited ${normalizedUrl} ${visitsForCurrentUrl} times. Either try a completely different approach or declare the task IMPOSSIBLE.`;
+      } else if (stepsWithoutProgress >= 4) {
+        loopWarning = `\n\n⚠️ STAGNATION DETECTED: ${stepsWithoutProgress} consecutive steps on the same page without progress. Take a decisive new action or declare IMPOSSIBLE.`;
       }
 
-      // ── 4. Call LLM ──
+      // ── 2. Build prompt (screenshot only — no DOM/HTML/text) ──
+      const systemPrompt = buildAgentSystemPromptV2(
+        refinedGoal,
+        whyHistory,
+        lastFeedback,
+        Array.from(blockedActions.values())
+      );
+
+      const userContent = [
+        {
+          type: 'text',
+          text:
+            `Current page title: ${page.pageTitle}\n` +
+            `Current page URL: ${page.pageUrl}\n` +
+            `Number of badges drawn on the screenshot: ${page.idCount} (ids 1..${page.idCount})${loopWarning}\n\n` +
+            `Look at the screenshot. Each red circular badge marks an interactive element. Pick the badge id of your target.`
+        }
+      ];
+      if (page.screenshot) {
+        userContent.push({ type: 'image_url', image_url: { url: page.screenshot, detail: 'high' } });
+      }
+
+      // ── 3. Call LLM ──
       let parsed;
       try {
         const rawResult = await callLLM(apiConfig, [
@@ -1913,7 +2566,6 @@ async function handleAgentSend(userGoal) {
           { role: 'user', content: userContent }
         ], currentAbortController.signal);
 
-        // Strip code fences if AI wraps in ```json
         const cleaned = rawResult.replace(/^```json?\s*/i, '').replace(/```\s*$/i, '').trim();
         parsed = JSON.parse(cleaned);
       } catch (err) {
@@ -1924,125 +2576,124 @@ async function handleAgentSend(userGoal) {
         break;
       }
 
-      // ── 5. Show thinking (collapsible) ──
+      // ── 4. Render thinking ──
       updateThinkingState(thinkingEl, `Step ${stepCount} — Thinking…`);
-      await delay(400);
+      await delay(300);
       await fadeOutAndRemove(thinkingEl, 300);
       activeAgentThinkingEl = null;
 
-      const thinking = parsed.thinking;
-      if (thinking) {
-        const thinkingDiv = document.createElement('div');
-        thinkingDiv.className = 'message ai agent-thinking';
+      const thinking = parsed.thinking || {};
+      const thinkingDiv = document.createElement('div');
+      thinkingDiv.className = 'message ai agent-thinking';
 
-        const thinkingHeader = document.createElement('div');
-        thinkingHeader.className = 'agent-thinking-header';
-        thinkingHeader.innerHTML = `<span class="agent-thinking-icon">🧠</span> <span>Step ${stepCount} — Thinking</span> <span class="agent-thinking-toggle">▶</span>`;
-        thinkingDiv.appendChild(thinkingHeader);
+      const thinkingHeader = document.createElement('div');
+      thinkingHeader.className = 'agent-thinking-header';
+      thinkingHeader.innerHTML = `<span class="agent-thinking-icon">🧠</span> <span>Step ${stepCount} — Thinking</span> <span class="agent-thinking-toggle">▶</span>`;
+      thinkingDiv.appendChild(thinkingHeader);
 
-        const thinkingBody = document.createElement('div');
-        thinkingBody.className = 'agent-thinking-body collapsed';
-        const thinkingMd = [
-          `**Goal Check:** ${thinking.goal_check || '—'}`,
-          `**State:** ${thinking.state || '—'}`,
-          `**Target:** ${thinking.target || '—'}`,
-          `**Reason:** ${thinking.action_reason || '—'}`
-        ].join('\n\n');
+      const thinkingBody = document.createElement('div');
+      thinkingBody.className = 'agent-thinking-body collapsed';
+      const thinkingMd = [
+        `**Goal achieved?** ${thinking.goal_achieved || '—'}`,
+        `**Previous action?** ${thinking.previous_action || '—'}`,
+        `**Screen on path?** ${thinking.screen_is_on_path || '—'}`,
+        `**Target choice:** ${thinking.target_choice || '—'}`,
+        `**Action choice:** ${thinking.action_choice || '—'}`,
+        `**Why this choice:** ${parsed.why_this_choice || '—'}`
+      ].join('\n\n');
 
-        if (typeof marked !== 'undefined') {
-          thinkingBody.innerHTML = marked.parse(thinkingMd);
-        } else {
-          thinkingBody.textContent = thinkingMd;
-        }
-        thinkingDiv.appendChild(thinkingBody);
+      if (typeof marked !== 'undefined') thinkingBody.innerHTML = marked.parse(thinkingMd);
+      else thinkingBody.textContent = thinkingMd;
+      thinkingDiv.appendChild(thinkingBody);
 
-        thinkingHeader.addEventListener('click', () => {
-          thinkingBody.classList.toggle('collapsed');
-          thinkingHeader.querySelector('.agent-thinking-toggle').textContent =
-            thinkingBody.classList.contains('collapsed') ? '▶' : '▼';
-        });
+      thinkingHeader.addEventListener('click', () => {
+        thinkingBody.classList.toggle('collapsed');
+        thinkingHeader.querySelector('.agent-thinking-toggle').textContent =
+          thinkingBody.classList.contains('collapsed') ? '▶' : '▼';
+      });
+      chatContainer.appendChild(thinkingDiv);
+      scrollToBottom();
 
-        chatContainer.appendChild(thinkingDiv);
-        scrollToBottom();
-      }
-
-      // ── 6. Show the command being executed ──
-      const instruct = parsed.instruct;
-      if (!instruct || !instruct.type) {
-        appendAIMessage('Agent returned invalid command. Stopping.', { className: 'message ai' });
+      // ── 5. Validate direct_response ──
+      const instruct = parsed.direct_response;
+      if (!instruct || !instruct.action) {
+        appendAIMessage('Agent returned invalid response (no direct_response.action). Stopping.', { className: 'message ai' });
         agentRunning = false;
         break;
       }
 
+      // Append why to history (saved as string)
+      if (typeof parsed.why_this_choice === 'string' && parsed.why_this_choice.trim()) {
+        whyHistory.push(parsed.why_this_choice.trim());
+      } else {
+        whyHistory.push(`(no justification given) action=${instruct.action}${instruct.id != null ? ` id=${instruct.id}` : ''}`);
+      }
+
+      // ── 6. Show the command bubble ──
+      const idLabel = instruct.id != null ? ` id=${instruct.id}` : '';
+      const valLabel = instruct.value ? ` "${String(instruct.value).substring(0, 60)}"` : '';
       const cmdDiv = document.createElement('div');
       cmdDiv.className = 'message ai agent-command';
-      cmdDiv.innerHTML = `<span class="agent-cmd-icon">⚡</span> <strong>Step ${stepCount}:</strong> ${instruct.description || instruct.type}`;
+      cmdDiv.innerHTML = `<span class="agent-cmd-icon">⚡</span> <strong>Step ${stepCount}:</strong> ${instruct.action}${idLabel}${valLabel}`;
       chatContainer.appendChild(cmdDiv);
       scrollToBottom();
 
       await updateAgentPageOverlay({
         active: true,
         title: 'Alvelika Agent is working',
-        detail: instruct.description || `Executing ${instruct.type}.`,
-        step: `Step ${stepCount} • ${instruct.type}`
+        detail: `Executing ${instruct.action}${idLabel}.`,
+        step: `Step ${stepCount} • ${instruct.action}`
       });
 
-      // ── 7. Check if done ──
-      if (instruct.type === 'done') {
-        const doneText = instruct.description || 'Goal completed.';
+      // ── 7. Done? ──
+      if (String(instruct.action).toLowerCase() === 'done') {
+        const doneText = instruct.value || 'Goal completed.';
         appendAIMessage(doneText, { stream: true });
-        // Feed agent result back into shared conversation history so normal chat remembers it
         conversationHistory.push({ role: 'assistant', content: `[Agent completed] Goal: ${refinedGoal}\nResult: ${doneText}` });
         chrome.storage.local.set({ conversationHistory });
         agentRunning = false;
         break;
       }
 
-      // ── 8. Execute the command with retry guards ──
-      const actionSignature = getAgentActionSignature(instruct);
-      const priorFailureCount = isRetryTrackedAgentAction(instruct)
-        ? (actionFailureCounts.get(actionSignature) || 0)
-        : 0;
+      // ── 8. Execute with retry guard ──
+      const actionType = String(instruct.action).toLowerCase();
+      const sig = ['click', 'type', 'presskey'].includes(actionType)
+        ? `${actionType}:${instruct.id ?? ''}`
+        : actionType === 'navigate'
+          ? `navigate:${instruct.value || instruct.url || ''}`
+          : actionType === 'scroll'
+            ? `scroll:${(instruct.value || '').toLowerCase()}`
+            : actionType;
 
-      let blockedReason = blockedActions.get(actionSignature) || null;
+      const priorFailureCount = actionFailureCounts.get(sig) || 0;
+      let blockedReason = blockedActions.get(sig) || null;
       let result;
 
-      if (isRetryTrackedAgentAction(instruct) && priorFailureCount >= AGENT_MAX_ACTION_RETRIES) {
-        blockedReason = blockedReason || `${formatAgentCommand(instruct)} is blocked after ${AGENT_MAX_ACTION_RETRIES} failed attempts. Choose a different selector or approach.`;
-        blockedActions.set(actionSignature, blockedReason);
-        result = {
-          success: false,
-          errorType: 'retry_limit_reached',
-          error: blockedReason
-        };
+      if (priorFailureCount >= AGENT_MAX_ACTION_RETRIES) {
+        blockedReason = blockedReason || `${sig} is blocked after ${AGENT_MAX_ACTION_RETRIES} failed attempts. Pick a different id or action.`;
+        blockedActions.set(sig, blockedReason);
+        result = { success: false, errorType: 'retry_limit_reached', error: blockedReason };
       } else {
-        result = await executeAgentCommand(instruct);
+        result = await executeAgentCommandById(instruct);
       }
 
-      let failureCount = 0;
-      if (isRetryTrackedAgentAction(instruct)) {
-        if (result.success) {
-          actionFailureCounts.delete(actionSignature);
-        } else if (result.errorType === 'retry_limit_reached') {
-          failureCount = priorFailureCount;
-        } else {
-          failureCount = priorFailureCount + 1;
-          actionFailureCounts.set(actionSignature, failureCount);
-          if (failureCount >= AGENT_MAX_ACTION_RETRIES) {
-            blockedReason = `${formatAgentCommand(instruct)} is blocked after ${AGENT_MAX_ACTION_RETRIES} failed attempts. Last error: ${result.error || 'Unknown error.'}`;
-            blockedActions.set(actionSignature, blockedReason);
-          }
+      if (result.success) {
+        actionFailureCounts.delete(sig);
+      } else if (result.errorType !== 'retry_limit_reached') {
+        const newCount = priorFailureCount + 1;
+        actionFailureCounts.set(sig, newCount);
+        if (newCount >= AGENT_MAX_ACTION_RETRIES) {
+          blockedActions.set(sig, `${sig} is blocked after ${AGENT_MAX_ACTION_RETRIES} failures. Last error: ${result.error || 'unknown'}`);
         }
       }
 
-      const executionLogEntry = buildExecutionLogEntry(stepCount, instruct, result, {
-        failureCount,
-        blockedReason
-      });
-      executionHistoryLog = executionHistoryLog
-        ? `${executionHistoryLog}\n\n${executionLogEntry}`
-        : executionLogEntry;
-      lastExecutionFeedback = executionLogEntry;
+      // Build feedback for next step
+      const feedbackLines = [
+        `Step ${stepCount}: action=${instruct.action} id=${instruct.id ?? '—'} value=${instruct.value ? String(instruct.value).substring(0, 60) : '—'}`,
+        `${result.success ? '✓ SUCCESS' : '✗ FAILURE'}: ${result.description || result.error || 'no details'}`
+      ];
+      if (!result.success && result.error) feedbackLines.push(`Browser error: ${result.error}`);
+      lastFeedback = feedbackLines.join('\n');
 
       if (!result.success) {
         cmdDiv.innerHTML += ` <span style="color:#ff6b6b;">✗ ${result.error}</span>`;
