@@ -1620,7 +1620,7 @@ To act on an element, return its badge id. The program owns a map { id → eleme
 
 1. NEVER invent an id that is not visible as a red badge on the screenshot.
 2. If two badges are too close to read clearly, scroll or pick the one whose badge you can clearly identify.
-3. If the goal is achieved, immediately respond with action "done".
+3. If the goal is achieved, immediately respond with action "done". However, if the user asks you to type/send a message, you MUST actually type and send a NEW message. Do NOT say 'goal achieved' just because a similar message was sent in the past.
 4. After 2 scrolls without progress, MUST attempt a click on the best available badge.
 5. If the LAST EXECUTION FEEDBACK shows the previous action failed, pick a DIFFERENT id — do NOT repeat the same id.
 6. Reply with PURE JSON only — no markdown fences, no extra text before or after the JSON.
@@ -1740,8 +1740,15 @@ async function executeAgentCommandById(instruct) {
             el.dispatchEvent(new Event('input', { bubbles: true }));
             el.dispatchEvent(new Event('change', { bubbles: true }));
           } else if (el.isContentEditable) {
+            // Clear existing content first to prevent concatenation on retries
+            el.focus();
+            document.execCommand('selectAll', false, null);
+            document.execCommand('delete', false, null);
             const inserted = document.execCommand('insertText', false, value);
-            if (!inserted) el.textContent = value;
+            if (!inserted) {
+              el.textContent = value;
+              el.dispatchEvent(new Event('input', { bubbles: true }));
+            }
           } else {
             return { success: false, error: `Element id ${badgeId} is not a text input.` };
           }
@@ -1793,13 +1800,36 @@ async function executeAgentCommandById(instruct) {
           target.dispatchEvent(new KeyboardEvent('keypress', eventInit));
           target.dispatchEvent(new KeyboardEvent('keyup', eventInit));
 
-          if (keyName === 'Enter' && target.tagName && target.tagName.toLowerCase() === 'input') {
-            const form = target.closest('form');
-            if (form) {
-              const submitBtn = form.querySelector('[type="submit"], button:not([type="button"])');
-              if (submitBtn) submitBtn.click();
-              else if (form.requestSubmit) form.requestSubmit();
-              else form.submit();
+          if (keyName === 'Enter') {
+            // Handle form-based inputs
+            if (target.tagName && target.tagName.toLowerCase() === 'input') {
+              const form = target.closest('form');
+              if (form) {
+                const submitBtn = form.querySelector('[type="submit"], button:not([type="button"])');
+                if (submitBtn) submitBtn.click();
+                else if (form.requestSubmit) form.requestSubmit();
+                else form.submit();
+              }
+            }
+            // Handle contenteditable / modern chat UIs (e.g., Claude.ai, ChatGPT)
+            // Look for a nearby send/submit button and click it
+            if (target.isContentEditable || target.getAttribute('role') === 'textbox' || target.closest('[contenteditable="true"]')) {
+              const container = target.closest('form, [class*="composer"], [class*="input"], [class*="chat"], [class*="message"], [class*="editor"], [data-testid]') || target.parentElement?.parentElement?.parentElement || document.body;
+              const sendBtn = container.querySelector('button[type="submit"], button[aria-label*="Send"], button[aria-label*="send"], button[data-testid*="send"], button[class*="send"], button[class*="submit"]');
+              if (sendBtn && !sendBtn.disabled) {
+                sendBtn.click();
+              } else {
+                // Broader fallback: find the closest button that looks like a send button
+                const allButtons = document.querySelectorAll('button');
+                for (const btn of allButtons) {
+                  const rect = btn.getBoundingClientRect();
+                  if (rect.width === 0 || rect.height === 0) continue;
+                  const label = (btn.getAttribute('aria-label') || btn.textContent || '').toLowerCase();
+                  if (label.includes('send') || label.includes('submit') || btn.querySelector('svg[data-testid*="send"]')) {
+                    if (!btn.disabled) { btn.click(); break; }
+                  }
+                }
+              }
             }
           }
           return { success: true, description: `Pressed ${keyName}${badgeId ? ` on id ${badgeId}` : ''}` };
@@ -2212,7 +2242,7 @@ async function executeAgentCommand(instruct) {
 
 let agentRunning = false;
 let currentAbortController = null;
-const AGENT_MAX_STEPS = 15;
+const AGENT_MAX_STEPS = 31;
 const AGENT_MAX_ACTION_RETRIES = 3;
 const AGENT_OVERLAY_STORAGE_KEY = 'agentOverlayState';
 
@@ -2454,7 +2484,7 @@ async function handleAgentSend(userGoal) {
   await updateAgentPageOverlay({
     active: true,
     title: 'Alvelika Agent is working',
-    detail: 'Understanding your goal and locking the page so nothing gets interrupted.',
+    detail: `Goal: ${userGoal}\n\nUnderstanding your goal and locking the page so nothing gets interrupted.`,
     step: 'Preparing'
   });
 
@@ -2511,11 +2541,7 @@ async function handleAgentSend(userGoal) {
       await fadeOutAndRemove(goalThinkingEl, 300);
       activeAgentThinkingEl = null;
 
-      const goalDiv = document.createElement('div');
-      goalDiv.className = 'message ai agent-command';
-      goalDiv.innerHTML = `<span class="agent-cmd-icon">🎯</span> <strong>Goal:</strong> ${refinedGoal}`;
-      chatContainer.appendChild(goalDiv);
-      scrollToBottom();
+      // Goal div removed from chat as per user request
 
     } catch (err) {
       await fadeOutAndRemove(goalThinkingEl, 300);
@@ -2540,7 +2566,7 @@ async function handleAgentSend(userGoal) {
       await updateAgentPageOverlay({
         active: true,
         title: 'Alvelika Agent is working',
-        detail: `Step ${stepCount}: labeling the page and planning the next move.`,
+        detail: `Goal: ${refinedGoal}\n\nStep ${stepCount}: labeling the page and planning the next move.`,
         step: `Step ${stepCount} • labeling`
       });
 
@@ -2615,36 +2641,7 @@ async function handleAgentSend(userGoal) {
       activeAgentThinkingEl = null;
 
       const thinking = parsed.thinking || {};
-      const thinkingDiv = document.createElement('div');
-      thinkingDiv.className = 'message ai agent-thinking';
-
-      const thinkingHeader = document.createElement('div');
-      thinkingHeader.className = 'agent-thinking-header';
-      thinkingHeader.innerHTML = `<span class="agent-thinking-icon">🧠</span> <span>Step ${stepCount} — Thinking</span> <span class="agent-thinking-toggle">▶</span>`;
-      thinkingDiv.appendChild(thinkingHeader);
-
-      const thinkingBody = document.createElement('div');
-      thinkingBody.className = 'agent-thinking-body collapsed';
-      const thinkingMd = [
-        `**Goal achieved?** ${thinking.goal_achieved || '—'}`,
-        `**Previous action?** ${thinking.previous_action || '—'}`,
-        `**Screen on path?** ${thinking.screen_is_on_path || '—'}`,
-        `**Target choice:** ${thinking.target_choice || '—'}`,
-        `**Action choice:** ${thinking.action_choice || '—'}`,
-        `**Why this choice:** ${parsed.why_this_choice || '—'}`
-      ].join('\n\n');
-
-      if (typeof marked !== 'undefined') thinkingBody.innerHTML = marked.parse(thinkingMd);
-      else thinkingBody.textContent = thinkingMd;
-      thinkingDiv.appendChild(thinkingBody);
-
-      thinkingHeader.addEventListener('click', () => {
-        thinkingBody.classList.toggle('collapsed');
-        thinkingHeader.querySelector('.agent-thinking-toggle').textContent =
-          thinkingBody.classList.contains('collapsed') ? '▶' : '▼';
-      });
-      chatContainer.appendChild(thinkingDiv);
-      scrollToBottom();
+      // Thinking div removed from chat as per user request
 
       // ── 5. Validate direct_response ──
       const instruct = parsed.direct_response;
@@ -2664,16 +2661,12 @@ async function handleAgentSend(userGoal) {
       // ── 6. Show the command bubble ──
       const idLabel = instruct.id != null ? ` id=${instruct.id}` : '';
       const valLabel = instruct.value ? ` "${String(instruct.value).substring(0, 60)}"` : '';
-      const cmdDiv = document.createElement('div');
-      cmdDiv.className = 'message ai agent-command';
-      cmdDiv.innerHTML = `<span class="agent-cmd-icon">⚡</span> <strong>Step ${stepCount}:</strong> ${instruct.action}${idLabel}${valLabel}`;
-      chatContainer.appendChild(cmdDiv);
-      scrollToBottom();
+      // Command div removed from chat as per user request
 
       await updateAgentPageOverlay({
         active: true,
         title: 'Alvelika Agent is working',
-        detail: `Executing ${instruct.action}${idLabel}.`,
+        detail: `Goal: ${refinedGoal}\n\nExecuting: ${instruct.action}${idLabel}${valLabel}`,
         step: `Step ${stepCount} • ${instruct.action}`
       });
 
@@ -2727,12 +2720,7 @@ async function handleAgentSend(userGoal) {
       if (!result.success && result.error) feedbackLines.push(`Browser error: ${result.error}`);
       lastFeedback = feedbackLines.join('\n');
 
-      if (!result.success) {
-        cmdDiv.innerHTML += ` <span style="color:#ff6b6b;">✗ ${result.error}</span>`;
-      } else {
-        cmdDiv.innerHTML += ` <span style="color:#4ade80;">✓</span>`;
-      }
-      scrollToBottom();
+      // Removed cmdDiv updates
     }
 
     if (stepCount >= AGENT_MAX_STEPS) {
