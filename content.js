@@ -604,6 +604,7 @@ const screenExplanationOverlay = (() => {
     return String(text || '')
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-zA-Z0-9]+/g, ' ')
       .replace(/\s+/g, ' ')
       .trim()
       .toLowerCase();
@@ -637,6 +638,49 @@ const screenExplanationOverlay = (() => {
     return pieces.filter(Boolean).join(' ').replace(/\s+/g, ' ').trim().substring(0, 220);
   }
 
+  const genericTargetWords = new Set([
+    'left',
+    'right',
+    'top',
+    'bottom',
+    'sidebar',
+    'side',
+    'menu',
+    'item',
+    'button',
+    'icon',
+    'link',
+    'field',
+    'tab',
+    'panel',
+    'screen',
+    'page',
+    'interface',
+    'option',
+    'control',
+    'near',
+    'under',
+    'above',
+    'below',
+    'the',
+    'this',
+    'that',
+    'your',
+    'you',
+    'for',
+    'with',
+    'into',
+    'onto'
+  ]);
+
+  function wordsFrom(text) {
+    return normalizeText(text).split(' ').filter(Boolean);
+  }
+
+  function significantTargetWords(text) {
+    return wordsFrom(text).filter((word) => word.length > 2 && !genericTargetWords.has(word));
+  }
+
   function findTargetElement(target) {
     const targetText = typeof target === 'string' ? target : target?.text || target?.label || target?.target || '';
     const selector = typeof target === 'object' ? target?.selector : '';
@@ -651,7 +695,9 @@ const screenExplanationOverlay = (() => {
     }
 
     const needle = normalizeText(targetText);
-    if (!needle) return null;
+    const targetWords = significantTargetWords(targetText);
+    const coreNeedle = targetWords.join(' ');
+    if (!needle || targetWords.length === 0) return null;
 
     const candidates = Array.from(document.querySelectorAll([
       'button',
@@ -677,21 +723,26 @@ const screenExplanationOverlay = (() => {
 
     let best = null;
     let bestScore = 0;
-    const needleWords = needle.split(' ').filter(Boolean);
+    const viewportArea = Math.max(1, window.innerWidth * window.innerHeight);
 
     for (const el of candidates) {
       const label = normalizeText(elementLabel(el));
       if (!label) continue;
+      const labelWords = wordsFrom(label);
 
       let score = 0;
       if (label === needle) score = 100;
-      else if (label.includes(needle)) score = 86;
-      else if (needle.includes(label) && label.length > 3) score = 72;
-      else if (needleWords.length > 1 && needleWords.every((word) => label.includes(word))) score = 62;
-      else if (needleWords.some((word) => word.length > 3 && label.includes(word))) score = 40;
+      else if (coreNeedle && label === coreNeedle) score = 98;
+      else if (label.includes(needle) && needle.length > 3) score = 90;
+      else if (coreNeedle && label.includes(coreNeedle)) score = 86;
+      else if (targetWords.length > 1 && targetWords.every((word) => labelWords.includes(word))) score = 80;
+      else if (targetWords.length === 1 && targetWords[0].length >= 5 && labelWords.includes(targetWords[0])) score = 74;
 
-      const roleBoost = el.matches('button, a[href], input, textarea, select, summary, [role="button"], [role="link"]') ? 8 : 0;
+      const roleBoost = el.matches('button, a[href], input, textarea, select, summary, [role="button"], [role="link"], [role="menuitem"], [role="tab"]') ? 5 : 0;
       score += roleBoost;
+
+      const rect = el.getBoundingClientRect();
+      if ((rect.width * rect.height) / viewportArea > 0.28) score -= 14;
 
       if (score > bestScore) {
         best = el;
@@ -699,7 +750,7 @@ const screenExplanationOverlay = (() => {
       }
     }
 
-    return bestScore >= 48 ? best : null;
+    return bestScore >= 72 ? best : null;
   }
 
   function setColor(kind) {

@@ -356,6 +356,7 @@ function getCleanAnswerText(answerDiv) {
 function cleanScreenTarget(target) {
   return String(target || '')
     .replace(/[`*_]/g, '')
+    .replace(/\s+(?:it'?s|its|near|under|above|below|from|at|because|when|if)\b.*$/i, '')
     .replace(/[.!?,;:)\]]+$/g, '')
     .replace(/^(the|a|an)\s+/i, '')
     .replace(/\s+/g, ' ')
@@ -363,21 +364,92 @@ function cleanScreenTarget(target) {
     .substring(0, 80);
 }
 
-function inferTargetFromAnswer(text) {
+function inferTargetCandidateFromAnswer(text) {
   const source = text || '';
   const actionQuote = source.match(/\b(?:click|press|tap|choose|select|open)\s+(?:the\s+)?["'“”‘’]([^"'“”‘’]{2,80})["'“”‘’]/i);
-  if (actionQuote) return cleanScreenTarget(actionQuote[1]);
+  if (actionQuote) return { target: cleanScreenTarget(actionQuote[1]), confidence: 95 };
+
+  const knownTargets = [
+    'New chat',
+    'Customize',
+    'Artifacts',
+    'Artifact',
+    'Code',
+    'Share'
+  ];
+  const lowerSource = source.toLowerCase();
+  for (const known of knownTargets) {
+    if (lowerSource.includes(known.toLowerCase())) {
+      return { target: known, confidence: 88 };
+    }
+  }
+
+  const actionPhrase = source.match(/\b(?:click|press|tap|choose|select|open)\s+(?:the\s+)?([^().,;:\n"“”]{2,80}?)(?=\s+(?:near|under|above|below|from|at|because|when|if|it'?s|its)\b|[().,;:\n]|$)/i);
+  if (actionPhrase) return { target: cleanScreenTarget(actionPhrase[1]), confidence: 86 };
+
+  const nearbyQuote = source.match(/\b(?:labeled|called|named)\s+["'“”‘’]([^"'“”‘’]{2,80})["'“”‘’]/i);
+  if (nearbyQuote) return { target: cleanScreenTarget(nearbyQuote[1]), confidence: 84 };
 
   const firstQuote = source.match(/["'“”‘’]([^"'“”‘’]{2,80})["'“”‘’]/);
-  if (firstQuote) return cleanScreenTarget(firstQuote[1]);
-
-  const actionPhrase = source.match(/\b(?:click|press|tap|choose|select|open)\s+(?:the\s+)?([^().,;:\n]{2,80})/i);
-  if (actionPhrase) return cleanScreenTarget(actionPhrase[1]);
+  if (firstQuote) return { target: cleanScreenTarget(firstQuote[1]), confidence: 58 };
 
   const buttonPhrase = source.match(/\b(?:button|link|field|menu|sidebar|tab)\s+(?:called|named|labeled)?\s*([^().,;:\n]{2,80})/i);
-  if (buttonPhrase) return cleanScreenTarget(buttonPhrase[1]);
+  if (buttonPhrase) return { target: cleanScreenTarget(buttonPhrase[1]), confidence: 56 };
 
-  return '';
+  return { target: '', confidence: 0 };
+}
+
+function inferTargetFromAnswer(text) {
+  return inferTargetCandidateFromAnswer(text).target;
+}
+
+const genericScreenTargetWords = new Set([
+  'left',
+  'right',
+  'top',
+  'bottom',
+  'sidebar',
+  'side',
+  'menu',
+  'item',
+  'button',
+  'icon',
+  'link',
+  'field',
+  'tab',
+  'panel',
+  'screen',
+  'page',
+  'interface',
+  'option',
+  'control',
+  'near',
+  'under',
+  'above',
+  'below',
+  'the',
+  'this',
+  'that',
+  'your',
+  'you',
+  'for',
+  'with',
+  'into',
+  'onto'
+]);
+
+function significantScreenTargetWords(target) {
+  return String(target || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-zA-Z0-9]+/g, ' ')
+    .toLowerCase()
+    .split(' ')
+    .filter((word) => word.length > 2 && !genericScreenTargetWords.has(word));
+}
+
+function isGenericScreenTarget(target) {
+  return significantScreenTargetWords(target).length === 0;
 }
 
 function inferScreenKindFromAnswer(text) {
@@ -389,7 +461,8 @@ function inferScreenKindFromAnswer(text) {
 
 function buildFallbackScreenExplanation(answerDiv) {
   const answerText = getCleanAnswerText(answerDiv);
-  const target = inferTargetFromAnswer(answerText);
+  const inferred = inferTargetCandidateFromAnswer(answerText);
+  const target = inferred.target;
   const summary = answerText
     .replace(/\s+/g, ' ')
     .split(/(?<=[.!?])\s+/)[0]
@@ -402,13 +475,28 @@ function buildFallbackScreenExplanation(answerDiv) {
     body: target
       ? `Alvelika was referring to this part of the page. ${summary}`
       : summary,
-    kind: inferScreenKindFromAnswer(answerText)
+    kind: inferScreenKindFromAnswer(answerText),
+    confidence: inferred.confidence
   };
 }
 
 function getScreenExplanationForMessage(answerDiv) {
-  if (answerDiv.__screenExplanation) return answerDiv.__screenExplanation;
-  answerDiv.__screenExplanation = buildFallbackScreenExplanation(answerDiv);
+  const fallback = buildFallbackScreenExplanation(answerDiv);
+  if (answerDiv.__screenExplanation) {
+    const existing = answerDiv.__screenExplanation;
+    if (fallback.target && fallback.confidence >= 80 && isGenericScreenTarget(existing.target)) {
+      answerDiv.__screenExplanation = {
+        ...existing,
+        target: fallback.target,
+        title: fallback.title,
+        body: fallback.body,
+        kind: fallback.kind
+      };
+    }
+    return answerDiv.__screenExplanation;
+  }
+
+  answerDiv.__screenExplanation = fallback;
   return answerDiv.__screenExplanation;
 }
 
@@ -1288,7 +1376,7 @@ CRITICAL INSTRUCTIONS:
 6. FORMATTING DISCIPLINE: Do not use raw HTML colors. Use bold sparingly for meaningful terms. Put important equations in display math with $$...$$, especially formulas that define a result or method.
 7. OPTIONAL SCREEN EXPLANATION: If the user asks what/where/which visible page element matters, or your answer would clearly benefit from pointing at something on the current webpage, append exactly one hidden block after your answer:
 <screen_explanation>{"target":"visible text, aria label, or short natural-language name of the page element","title":"short title","body":"one or two helpful sentences","kind":"concept|action|result|caution"}</screen_explanation>
-Use this only for elements on the active webpage, not Alvelika's side panel. If no visual page callout is useful, omit the block.`;
+The target MUST be the exact visible label or aria-label of the control when possible, such as "New chat" or "Customize". Never use vague targets like "left sidebar", "right button", "top menu", or "the menu". Use this only for elements on the active webpage, not Alvelika's side panel. If no visual page callout is useful, omit the block.`;
 
   // Push user message into conversation history
   conversationHistory.push({ role: 'user', content: userContent });
