@@ -98,7 +98,9 @@ function renderMarkdownWithMath(text, el) {
     return;
   }
   el.innerHTML = preprocessLatexAndParse(text || '');
+  normalizeGeneratedStyles(el);
   applyKatex(el);
+  annotateRenderedOutput(el);
 }
 
 function applyKatex(el) {
@@ -118,6 +120,296 @@ function applyKatex(el) {
   } catch (err) {
     console.warn('KaTeX render failed:', err);
   }
+}
+
+function normalizeGeneratedStyles(el) {
+  if (!el) return;
+
+  el.querySelectorAll('[style]').forEach((node) => {
+    if (node.closest('.code-block-wrapper, svg, .katex')) return;
+
+    ['color', 'background', 'background-color', 'border-color', 'box-shadow', 'text-shadow']
+      .forEach((prop) => node.style.removeProperty(prop));
+
+    if (!node.getAttribute('style')?.trim()) {
+      node.removeAttribute('style');
+    }
+  });
+}
+
+function normalizeSemanticText(text) {
+  return (text || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[.,;:!?()[\]{}"']/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toUpperCase();
+}
+
+function annotateRenderedOutput(el) {
+  if (!el) return;
+
+  const resultTerms = new Set([
+    'RSV',
+    'RESULT',
+    'RESULTAT',
+    'RESULTATS',
+    'SCORE',
+    'SCORES',
+    'POIDS',
+    'RANKING',
+    'CLASSEMENT',
+    'SORTIE'
+  ]);
+  const keywordTerms = new Set(['AND', 'OR', 'NOT', 'ET', 'OU', 'AND/OR', 'ET/OU']);
+  const formulaTerms = new Set(['TF', 'IDF', 'TF IDF', 'TF-IDF', 'TFIDF']);
+  const conceptTerms = new Set([
+    'CORPUS',
+    'DOCUMENT',
+    'DOCUMENTS',
+    'DIAPO',
+    'DIAPOS',
+    'EXEMPLE',
+    'EXEMPLES',
+    'MODELE',
+    'PAGE',
+    'REQUETE',
+    'REQUETES',
+    'TERME',
+    'TERMES',
+    'TEXTE',
+    'TEXTES'
+  ]);
+  const actionTerms = new Set([
+    'APPLIQUER',
+    'CALCULER',
+    'CHOISIR',
+    'COMPARER',
+    'DEFINIR',
+    'EXPLIQUER',
+    'INDEXER',
+    'LIRE',
+    'NORMALISER',
+    'OBTENIR',
+    'TRIER',
+    'UTILISER'
+  ]);
+  const cautionTerms = new Set([
+    'ATTENTION',
+    'ERREUR',
+    'IMPORTANT',
+    'LIMITATION',
+    'NOTE',
+    'PIEGE',
+    'PROBLEME'
+  ]);
+
+  el.querySelectorAll('strong').forEach((node) => {
+    const label = normalizeSemanticText(node.textContent);
+
+    if (resultTerms.has(label)) {
+      node.classList.add('semantic-result');
+      node.closest('li')?.classList.add('semantic-result-step');
+    } else if (formulaTerms.has(label)) {
+      node.classList.add('semantic-formula-term');
+      node.closest('li')?.classList.add('has-feature-formula');
+    } else if (keywordTerms.has(label)) {
+      node.classList.add('semantic-keyword');
+    } else if (conceptTerms.has(label)) {
+      node.classList.add('semantic-concept');
+      node.closest('li')?.classList.add('semantic-concept-step');
+    } else if (actionTerms.has(label)) {
+      node.classList.add('semantic-action');
+      node.closest('li')?.classList.add('semantic-action-step');
+    } else if (cautionTerms.has(label)) {
+      node.classList.add('semantic-caution');
+      node.closest('li')?.classList.add('semantic-caution-step');
+    }
+  });
+
+  el.querySelectorAll('ol > li').forEach((node) => {
+    const label = normalizeSemanticText(node.textContent);
+    const startsWithAny = (terms) => [...terms].some((term) => label === term || label.startsWith(`${term} `));
+
+    if (startsWithAny(cautionTerms)) {
+      node.classList.add('semantic-caution-step');
+    } else if (startsWithAny(actionTerms)) {
+      node.classList.add('semantic-action-step');
+    } else if (startsWithAny(conceptTerms)) {
+      node.classList.add('semantic-concept-step');
+    }
+  });
+
+  el.querySelectorAll('.katex').forEach((node) => {
+    const tex = node.querySelector('annotation[encoding="application/x-tex"]')?.textContent || node.textContent || '';
+    const compact = tex.replace(/\s+/g, ' ').trim();
+
+    if (!compact) return;
+
+    if (/[=≈<>]|\\frac|\\sum|\\prod|\\int|\\cdot|\\times|·|\bTF\b|\bIDF\b|\bw_\{/.test(compact)) {
+      node.classList.add('math-formula');
+      node.closest('li')?.classList.add('has-feature-formula');
+    } else if (/\\wedge|\\vee|\\neg|\bAND\b|\bOR\b/.test(compact)) {
+      node.classList.add('math-operator');
+    }
+  });
+}
+
+function extractScreenExplanation(text) {
+  const source = text || '';
+  const match = source.match(/<screen_explanation\b[^>]*>([\s\S]*?)<\/screen_explanation>/i);
+  if (!match) return { text: source, callout: null };
+
+  const cleanText = source.replace(/<screen_explanation\b[^>]*>[\s\S]*?<\/screen_explanation>/gi, '').trim();
+  let jsonText = match[1].trim();
+  jsonText = jsonText.replace(/^```(?:json)?/i, '').replace(/```$/i, '').trim();
+
+  try {
+    const parsed = JSON.parse(jsonText);
+    const title = String(parsed.title || 'Look here').trim();
+    const body = String(parsed.body || parsed.explanation || '').trim();
+    const target = String(parsed.target || parsed.selector || parsed.label || '').trim();
+    const kind = String(parsed.kind || parsed.type || 'default').trim().toLowerCase();
+
+    if (!title && !body) return { text: cleanText, callout: null };
+
+    return {
+      text: cleanText,
+      callout: {
+        target,
+        title: title.substring(0, 90),
+        body: body.substring(0, 420),
+        kind: ['concept', 'action', 'result', 'caution'].includes(kind) ? kind : 'default'
+      }
+    };
+  } catch (err) {
+    console.warn('Could not parse screen explanation:', err);
+    return { text: cleanText, callout: null };
+  }
+}
+
+async function showScreenExplanationOnPage(callout) {
+  if (!callout) return false;
+
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab?.id || tab.url?.startsWith('chrome://') || tab.url?.startsWith('edge://') || tab.url?.startsWith('about:')) {
+      return false;
+    }
+
+    const message = {
+      action: 'showScreenExplanation',
+      payload: callout
+    };
+
+    try {
+      await chrome.tabs.sendMessage(tab.id, message);
+      return true;
+    } catch (firstErr) {
+      const ready = await ensureContentScriptForTab(tab);
+      if (!ready) {
+        console.log('Could not prepare page for screen explanation:', firstErr);
+        return false;
+      }
+    }
+
+    await chrome.tabs.sendMessage(tab.id, message);
+    return true;
+  } catch (err) {
+    console.log('Could not show screen explanation:', err);
+    return false;
+  }
+}
+
+async function ensureContentScriptForTab(tab) {
+  if (!tab?.id) return false;
+
+  try {
+    const check = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => Boolean(window.__alvelikaContentScriptReady)
+    });
+
+    if (check?.[0]?.result) return true;
+
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ['content.js']
+    });
+
+    await delay(80);
+    return true;
+  } catch (err) {
+    console.log('Could not inject content script:', err);
+    return false;
+  }
+}
+
+function getCleanAnswerText(answerDiv) {
+  if (!answerDiv) return '';
+  const clone = answerDiv.cloneNode(true);
+  clone.querySelectorAll('.message-actions').forEach((node) => node.remove());
+  return clone.innerText.replace(/\s+/g, ' ').trim();
+}
+
+function cleanScreenTarget(target) {
+  return String(target || '')
+    .replace(/[`*_]/g, '')
+    .replace(/[.!?,;:)\]]+$/g, '')
+    .replace(/^(the|a|an)\s+/i, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .substring(0, 80);
+}
+
+function inferTargetFromAnswer(text) {
+  const source = text || '';
+  const actionQuote = source.match(/\b(?:click|press|tap|choose|select|open)\s+(?:the\s+)?["'“”‘’]([^"'“”‘’]{2,80})["'“”‘’]/i);
+  if (actionQuote) return cleanScreenTarget(actionQuote[1]);
+
+  const firstQuote = source.match(/["'“”‘’]([^"'“”‘’]{2,80})["'“”‘’]/);
+  if (firstQuote) return cleanScreenTarget(firstQuote[1]);
+
+  const actionPhrase = source.match(/\b(?:click|press|tap|choose|select|open)\s+(?:the\s+)?([^().,;:\n]{2,80})/i);
+  if (actionPhrase) return cleanScreenTarget(actionPhrase[1]);
+
+  const buttonPhrase = source.match(/\b(?:button|link|field|menu|sidebar|tab)\s+(?:called|named|labeled)?\s*([^().,;:\n]{2,80})/i);
+  if (buttonPhrase) return cleanScreenTarget(buttonPhrase[1]);
+
+  return '';
+}
+
+function inferScreenKindFromAnswer(text) {
+  if (/\b(attention|warning|avoid|error|problem|don't|do not|careful)\b/i.test(text)) return 'caution';
+  if (/\b(result|output|score|answer|rsv|final)\b/i.test(text)) return 'result';
+  if (/\b(click|press|tap|choose|select|open|button|link|menu)\b/i.test(text)) return 'action';
+  return 'concept';
+}
+
+function buildFallbackScreenExplanation(answerDiv) {
+  const answerText = getCleanAnswerText(answerDiv);
+  const target = inferTargetFromAnswer(answerText);
+  const summary = answerText
+    .replace(/\s+/g, ' ')
+    .split(/(?<=[.!?])\s+/)[0]
+    ?.substring(0, 220)
+    || 'This note is connected to what Alvelika explained in chat.';
+
+  return {
+    target,
+    title: target ? `Look for ${target}` : 'Screen explanation',
+    body: target
+      ? `Alvelika was referring to this part of the page. ${summary}`
+      : summary,
+    kind: inferScreenKindFromAnswer(answerText)
+  };
+}
+
+function getScreenExplanationForMessage(answerDiv) {
+  if (answerDiv.__screenExplanation) return answerDiv.__screenExplanation;
+  answerDiv.__screenExplanation = buildFallbackScreenExplanation(answerDiv);
+  return answerDiv.__screenExplanation;
 }
 
 // ─── Global code copy listener ───
@@ -629,6 +921,39 @@ function addMessageActions(answerDiv) {
   const actions = document.createElement('div');
   actions.className = 'message-actions';
 
+  const screenBtn = document.createElement('button');
+  screenBtn.className = 'msg-action-btn screen-explain-btn';
+  screenBtn.title = 'Show explanation on page';
+  screenBtn.innerHTML = `
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="3"></circle>
+      <path d="M12 2v4"></path>
+      <path d="M12 18v4"></path>
+      <path d="M2 12h4"></path>
+      <path d="M18 12h4"></path>
+    </svg>
+    <span>Show on page</span>
+  `;
+  screenBtn.addEventListener('click', async () => {
+    if (screenBtn.disabled) return;
+
+    const label = screenBtn.querySelector('span');
+    const originalLabel = label?.textContent || 'Show on page';
+    screenBtn.disabled = true;
+    if (label) label.textContent = 'Showing...';
+
+    const callout = getScreenExplanationForMessage(answerDiv);
+    const shown = await showScreenExplanationOnPage(callout);
+
+    if (label) label.textContent = shown ? 'Shown' : 'Can’t show here';
+    setTimeout(() => {
+      if (label) label.textContent = originalLabel;
+      screenBtn.disabled = false;
+    }, shown ? 1400 : 2400);
+  });
+  actions.appendChild(screenBtn);
+
   const regenBtn = document.createElement('button');
   regenBtn.className = 'msg-action-btn regenerate-btn';
   regenBtn.title = 'Regenerate response';
@@ -657,7 +982,7 @@ function addMessageActions(answerDiv) {
     <span>Copy</span>
   `;
   copyBtn.addEventListener('click', () => {
-    const text = answerDiv.innerText.replace(/\n?Regenerate\n?Copy\n?$/, '').trim();
+    const text = getCleanAnswerText(answerDiv);
     navigator.clipboard.writeText(text);
     const originalHTML = copyBtn.innerHTML;
     copyBtn.innerHTML = '<span>Copied!</span>';
@@ -723,16 +1048,19 @@ async function regenerateLastAssistantMessage(answerDiv) {
       currentAbortController.signal,
       { temperature: 1.0, top_p: 0.95, seed }
     );
+    const parsedResult = extractScreenExplanation(rawResult);
+    const responseText = parsedResult.text || rawResult;
+    const screenExplanation = parsedResult.callout;
 
     if (isDeepThink) {
       let thinkingText = '';
       let finalAnswer = '';
-      const thoughtMatch = rawResult.match(/<thought>([\s\S]*?)<\/thought>/i);
+      const thoughtMatch = responseText.match(/<thought>([\s\S]*?)<\/thought>/i);
       if (thoughtMatch) thinkingText = thoughtMatch[1].trim();
-      const answerMatch = rawResult.match(/<answer>([\s\S]*?)<\/answer>/i);
+      const answerMatch = responseText.match(/<answer>([\s\S]*?)<\/answer>/i);
       finalAnswer = answerMatch
         ? answerMatch[1].trim()
-        : rawResult.replace(/<thought>[\s\S]*?<\/thought>/gi, '').replace(/<\/?answer>/gi, '').trim();
+        : responseText.replace(/<thought>[\s\S]*?<\/thought>/gi, '').replace(/<\/?answer>/gi, '').trim();
 
       await fadeOutAndRemove(thinkingEl, 400);
 
@@ -758,20 +1086,24 @@ async function regenerateLastAssistantMessage(answerDiv) {
 
       const newDiv = document.createElement('div');
       newDiv.className = 'message ai stream-text';
+      newDiv.__screenExplanation = screenExplanation;
       chatContainer.appendChild(newDiv);
-      conversationHistory.push({ role: 'assistant', content: rawResult });
+      conversationHistory.push({ role: 'assistant', content: responseText });
       chrome.storage.local.set({ conversationHistory });
-      await streamText(finalAnswer || rawResult, newDiv, currentAbortController.signal);
+      await streamText(finalAnswer || responseText, newDiv, currentAbortController.signal);
       addMessageActions(newDiv);
+      if (screenExplanation) showScreenExplanationOnPage(screenExplanation);
     } else {
       await fadeOutAndRemove(thinkingEl, 400);
       const newDiv = document.createElement('div');
       newDiv.className = 'message ai stream-text';
+      newDiv.__screenExplanation = screenExplanation;
       chatContainer.appendChild(newDiv);
-      conversationHistory.push({ role: 'assistant', content: rawResult });
+      conversationHistory.push({ role: 'assistant', content: responseText });
       chrome.storage.local.set({ conversationHistory });
-      await streamText(rawResult, newDiv, currentAbortController.signal);
+      await streamText(responseText, newDiv, currentAbortController.signal);
       addMessageActions(newDiv);
+      if (screenExplanation) showScreenExplanationOnPage(screenExplanation);
     }
   } catch (err) {
     if (err.name === 'AbortError' || (err.message && err.message.includes('aborted'))) {
@@ -936,7 +1268,8 @@ CRITICAL INSTRUCTIONS:
 
 3. Inside <answer>, write your final response informed by all 12 answers above.
 4. PROVE YOU ARE WATCHING: If the page is relevant, mention a specific detail from the page (like the title, a name, or a fact).
-5. BE KIND & ELEGANT: Use Markdown (###, **, -) to make the answer beautiful. NO EMOJIS ALLOWED.`
+5. BE KIND & ELEGANT: Use Markdown (###, **, -) to make the answer beautiful. NO EMOJIS ALLOWED.
+6. FORMATTING DISCIPLINE: Do not use raw HTML colors. Use bold sparingly for meaningful terms. Put important equations in display math with $$...$$, especially formulas that define a result or method.`
     : `You are Alvelika, a dedicated educational AI assistant designed to help students deeply understand documents and web pages.
 You are "watching" the screen with the student. You receive both the page's text AND a screenshot of what they currently see.
 You are part of a persistent chat session. The user may switch between normal chat and "Agent mode" (where you autonomously perform browser actions). The conversation history below contains ALL messages — including agent task requests, agent results, and agent interruptions. Use this history to understand what has happened so far.
@@ -951,7 +1284,11 @@ CRITICAL INSTRUCTIONS:
 2. Respond directly to the user. Do NOT use any XML tags like <thought> or <answer>. Just write the response.
 3. PROVE YOU ARE WATCHING: When relevant, explicitly mention specific details, terms, or phrases from the page context to anchor your explanations in what the student is actively looking at.
 4. BE KIND, ENCOURAGING & ELEGANT: Use a supportive, teacher-like tone. Use Markdown (###, **, -) to make the answer beautiful and easy to read. YOU MUST NOT USE ANY EMOJIS (NO SMILEYS, NO ICONS) UNDER ANY CIRCUMSTANCES.
-5. If the conversation history contains agent results, you are aware of what happened and can reference those results naturally.`;
+5. If the conversation history contains agent results, you are aware of what happened and can reference those results naturally.
+6. FORMATTING DISCIPLINE: Do not use raw HTML colors. Use bold sparingly for meaningful terms. Put important equations in display math with $$...$$, especially formulas that define a result or method.
+7. OPTIONAL SCREEN EXPLANATION: If the user asks what/where/which visible page element matters, or your answer would clearly benefit from pointing at something on the current webpage, append exactly one hidden block after your answer:
+<screen_explanation>{"target":"visible text, aria label, or short natural-language name of the page element","title":"short title","body":"one or two helpful sentences","kind":"concept|action|result|caution"}</screen_explanation>
+Use this only for elements on the active webpage, not Alvelika's side panel. If no visual page callout is useful, omit the block.`;
 
   // Push user message into conversation history
   conversationHistory.push({ role: 'user', content: userContent });
@@ -971,21 +1308,24 @@ CRITICAL INSTRUCTIONS:
 
   try {
     const rawResult = await callLLM(apiConfig, messages, currentAbortController.signal);
+    const parsedResult = extractScreenExplanation(rawResult);
+    const responseText = parsedResult.text || rawResult;
+    const screenExplanation = parsedResult.callout;
 
     if (isDeepThink) {
       let thinkingText = '';
       let finalAnswer = '';
 
-      const thoughtMatch = rawResult.match(/<thought>([\s\S]*?)<\/thought>/i);
+      const thoughtMatch = responseText.match(/<thought>([\s\S]*?)<\/thought>/i);
       if (thoughtMatch) {
         thinkingText = thoughtMatch[1].trim();
       }
 
-      const answerMatch = rawResult.match(/<answer>([\s\S]*?)<\/answer>/i);
+      const answerMatch = responseText.match(/<answer>([\s\S]*?)<\/answer>/i);
       if (answerMatch) {
         finalAnswer = answerMatch[1].trim();
       } else {
-        finalAnswer = rawResult.replace(/<thought>[\s\S]*?<\/thought>/gi, '').replace(/<\/?answer>/gi, '').trim();
+        finalAnswer = responseText.replace(/<thought>[\s\S]*?<\/thought>/gi, '').replace(/<\/?answer>/gi, '').trim();
       }
 
       updateThinkingState(thinkingEl, 'Deep thinking…');
@@ -1022,22 +1362,26 @@ CRITICAL INSTRUCTIONS:
 
       const answerDiv = document.createElement('div');
       answerDiv.className = 'message ai stream-text';
+      answerDiv.__screenExplanation = screenExplanation;
       chatContainer.appendChild(answerDiv);
-      conversationHistory.push({ role: 'assistant', content: rawResult });
+      conversationHistory.push({ role: 'assistant', content: responseText });
       chrome.storage.local.set({ conversationHistory });
       await streamText(finalAnswer, answerDiv, currentAbortController.signal);
       addMessageActions(answerDiv);
+      if (screenExplanation) showScreenExplanationOnPage(screenExplanation);
 
     } else {
       await fadeOutAndRemove(thinkingEl, 400);
 
       const answerDiv = document.createElement('div');
       answerDiv.className = 'message ai stream-text';
+      answerDiv.__screenExplanation = screenExplanation;
       chatContainer.appendChild(answerDiv);
-      conversationHistory.push({ role: 'assistant', content: rawResult });
+      conversationHistory.push({ role: 'assistant', content: responseText });
       chrome.storage.local.set({ conversationHistory });
-      await streamText(rawResult, answerDiv, currentAbortController.signal);
+      await streamText(responseText, answerDiv, currentAbortController.signal);
       addMessageActions(answerDiv);
+      if (screenExplanation) showScreenExplanationOnPage(screenExplanation);
     }
 
   } catch (err) {

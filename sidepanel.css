@@ -17,9 +17,29 @@
   --accent-bright: #9b7dff;
   --accent-muted: #6b4fd4;
 
-  /* Secondary accent — cyan */
-  --cyan: #38bdf8;
-  --cyan-soft: rgba(56, 189, 248, 0.10);
+  /* Secondary accent - result green */
+  --secondary: #22c55e;
+  --secondary-bright: #86efac;
+  --secondary-muted: #16a34a;
+  --secondary-soft: rgba(34, 197, 94, 0.12);
+  --secondary-glow: rgba(34, 197, 94, 0.24);
+  --secondary-border: rgba(34, 197, 94, 0.26);
+  --cyan: var(--secondary);
+  --cyan-soft: var(--secondary-soft);
+
+  /* Companion semantic accents */
+  --concept: #38bdf8;
+  --concept-bright: #7dd3fc;
+  --concept-soft: rgba(56, 189, 248, 0.12);
+  --concept-border: rgba(56, 189, 248, 0.26);
+  --action: #f59e0b;
+  --action-bright: #fcd34d;
+  --action-soft: rgba(245, 158, 11, 0.13);
+  --action-border: rgba(245, 158, 11, 0.28);
+  --caution: #fb7185;
+  --caution-bright: #fda4af;
+  --caution-soft: rgba(251, 113, 133, 0.12);
+  --caution-border: rgba(251, 113, 133, 0.28);
 
   /* Text */
   --text-primary: #e8e8ef;
@@ -86,7 +106,7 @@ body::before {
   pointer-events: none;
   z-index: 0;
   background: radial-gradient(ellipse at 20% 0%, rgba(124, 92, 252, 0.04) 0%, transparent 60%),
-              radial-gradient(ellipse at 80% 100%, rgba(56, 189, 248, 0.03) 0%, transparent 60%);
+              radial-gradient(ellipse at 80% 100%, rgba(34, 197, 94, 0.035) 0%, transparent 60%);
 }
 
 /* ═══════════════════════════════════════════════
@@ -147,7 +167,7 @@ body::before {
   font-size: 15px;
   font-weight: 700;
   letter-spacing: 0.5px;
-  background: linear-gradient(135deg, #e8e8ef 0%, var(--accent-bright) 50%, var(--cyan) 100%);
+  background: linear-gradient(135deg, #e8e8ef 0%, var(--accent-bright) 50%, var(--secondary-bright) 100%);
   background-size: 200% 200%;
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
@@ -349,7 +369,7 @@ body::before {
 /* User message */
 .message.user {
   align-self: flex-end;
-  background: linear-gradient(135deg, rgba(124, 92, 252, 0.18) 0%, rgba(56, 189, 248, 0.08) 100%);
+  background: linear-gradient(135deg, rgba(124, 92, 252, 0.18) 0%, rgba(34, 197, 94, 0.08) 100%);
   border: 1px solid var(--border-accent);
   padding: 12px 18px;
   border-radius: var(--radius-lg);
@@ -370,8 +390,8 @@ body::before {
 
 /* AI response card (only the actual answer, not thinking/command blocks) */
 .message.ai.stream-text {
-  padding: 10px 16px;
-  background: linear-gradient(135deg, rgba(255, 255, 255, 0.02) 0%, rgba(124, 92, 252, 0.02) 100%);
+  padding: 12px 16px;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.022) 0%, rgba(34, 197, 94, 0.018) 100%);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
   backdrop-filter: blur(4px);
@@ -428,7 +448,7 @@ body::before {
   white-space: normal;
   word-break: break-word;
   color: var(--text-primary);
-  line-height: 1.5;
+  line-height: 1.58;
   padding: 2px 0;
 }
 
@@ -444,7 +464,7 @@ body::before {
 /* ── Paragraphs ── */
 .stream-text p {
   margin-top: 0;
-  margin-bottom: 6px;
+  margin-bottom: 8px;
   font-size: 13.5px;
 }
 
@@ -505,16 +525,16 @@ body::before {
 /* ── Lists — styled bullets ── */
 .stream-text ul,
 .stream-text ol {
-  margin-top: 2px;
-  margin-bottom: 6px;
-  padding-left: 8px;
+  margin-top: 4px;
+  margin-bottom: 10px;
+  padding-left: 10px;
   list-style: none;
 }
 
 .stream-text ul > li {
   position: relative;
-  padding-left: 18px;
-  margin-bottom: 2px;
+  padding-left: 20px;
+  margin-bottom: 6px;
   font-size: 13.5px;
 }
 
@@ -532,14 +552,14 @@ body::before {
 
 .stream-text ol {
   counter-reset: list-counter;
-  padding-left: 8px;
+  padding-left: 10px;
 }
 
 .stream-text ol > li {
   counter-increment: list-counter;
   position: relative;
-  padding-left: 28px;
-  margin-bottom: 2px;
+  padding-left: 34px;
+  margin-bottom: 8px;
   font-size: 13.5px;
 }
 
@@ -554,18 +574,48 @@ body::before {
   content: counter(list-counter);
   position: absolute;
   left: 0;
-  top: 0;
-  width: 20px;
-  height: 20px;
-  border-radius: 6px;
+  top: 1px;
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
   background: var(--accent-soft);
   color: var(--accent-bright);
+  border: 1px solid rgba(124, 92, 252, 0.16);
   font-size: 11px;
   font-weight: 700;
   display: flex;
   align-items: center;
   justify-content: center;
   line-height: 1;
+}
+
+.stream-text ol > li.semantic-concept-step::before {
+  background: var(--concept-soft);
+  color: var(--concept-bright);
+  border-color: var(--concept-border);
+  box-shadow: 0 0 8px rgba(56, 189, 248, 0.10);
+}
+
+.stream-text ol > li.semantic-action-step::before {
+  background: var(--action-soft);
+  color: var(--action-bright);
+  border-color: var(--action-border);
+  box-shadow: 0 0 8px rgba(245, 158, 11, 0.10);
+}
+
+.stream-text ol > li.semantic-caution-step::before {
+  background: var(--caution-soft);
+  color: var(--caution-bright);
+  border-color: var(--caution-border);
+  box-shadow: 0 0 8px rgba(251, 113, 133, 0.10);
+}
+
+.stream-text ol > li.semantic-result-step::before,
+.stream-text ol > li.has-feature-formula::before {
+  background: var(--secondary-soft);
+  color: var(--secondary-bright);
+  border-color: var(--secondary-border);
+  box-shadow: 0 0 8px rgba(34, 197, 94, 0.10);
 }
 
 .stream-text li p {
@@ -578,9 +628,95 @@ body::before {
   font-weight: 600;
 }
 
+.stream-text strong.semantic-keyword {
+  color: var(--accent-bright);
+  font-weight: 700;
+}
+
+.stream-text strong.semantic-result,
+.stream-text strong.semantic-formula-term {
+  color: var(--secondary-bright);
+  font-weight: 700;
+  background: var(--secondary-soft);
+  border: 1px solid var(--secondary-border);
+  border-radius: 6px;
+  padding: 1px 6px;
+}
+
+.stream-text strong.semantic-concept,
+.stream-text strong.semantic-action,
+.stream-text strong.semantic-caution {
+  font-weight: 700;
+  border-radius: 6px;
+  padding: 1px 6px;
+}
+
+.stream-text strong.semantic-concept {
+  color: var(--concept-bright);
+  background: var(--concept-soft);
+  border: 1px solid var(--concept-border);
+}
+
+.stream-text strong.semantic-action {
+  color: var(--action-bright);
+  background: var(--action-soft);
+  border: 1px solid var(--action-border);
+}
+
+.stream-text strong.semantic-caution {
+  color: var(--caution-bright);
+  background: var(--caution-soft);
+  border: 1px solid var(--caution-border);
+}
+
 .stream-text em {
   color: var(--text-secondary);
   font-style: italic;
+}
+
+/* -- Math and semantic output -- */
+.stream-text .katex {
+  color: inherit;
+}
+
+.stream-text .katex.math-operator {
+  color: var(--accent-bright);
+}
+
+.stream-text .katex.math-formula {
+  display: inline-block;
+  max-width: 100%;
+  margin: 1px 2px;
+  padding: 3px 8px;
+  color: var(--secondary-bright);
+  background: linear-gradient(135deg, var(--secondary-soft) 0%, rgba(255, 255, 255, 0.018) 100%);
+  border: 1px solid var(--secondary-border);
+  border-radius: 8px;
+  line-height: 1.35;
+  box-shadow: 0 0 10px rgba(34, 197, 94, 0.06);
+}
+
+.stream-text .katex-display {
+  display: block;
+  margin: 12px 0 14px;
+  padding: 12px 14px;
+  overflow-x: auto;
+  background: linear-gradient(135deg, rgba(34, 197, 94, 0.10) 0%, rgba(255, 255, 255, 0.018) 100%);
+  border: 1px solid var(--secondary-border);
+  border-left: 3px solid var(--secondary);
+  border-radius: var(--radius-sm);
+  text-align: center;
+}
+
+.stream-text .katex-display > .katex {
+  display: inline-block;
+  margin: 0;
+  padding: 0;
+  color: var(--text-bright);
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  text-align: initial;
 }
 
 /* ── Blockquote — card-style ── */
@@ -590,7 +726,7 @@ body::before {
   color: var(--text-secondary);
   font-style: italic;
   margin: 8px 0;
-  background: linear-gradient(135deg, rgba(124, 92, 252, 0.06) 0%, rgba(56, 189, 248, 0.03) 100%);
+  background: linear-gradient(135deg, rgba(124, 92, 252, 0.06) 0%, rgba(34, 197, 94, 0.035) 100%);
   border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
   font-size: 13px;
   line-height: 1.6;
@@ -684,16 +820,16 @@ body::before {
 
 /* ── Links ── */
 .stream-text a {
-  color: var(--cyan);
+  color: var(--secondary);
   text-decoration: none;
-  border-bottom: 1px solid rgba(56, 189, 248, 0.25);
+  border-bottom: 1px solid var(--secondary-border);
   transition: all var(--transition-fast);
   padding-bottom: 1px;
 }
 
 .stream-text a:hover {
-  border-bottom-color: var(--cyan);
-  color: #7dd3fc;
+  border-bottom-color: var(--secondary);
+  color: var(--secondary-bright);
 }
 
 /* ── Horizontal rule — section divider ── */
@@ -750,6 +886,11 @@ body::before {
   transform: scale(0.97);
 }
 
+.msg-action-btn:disabled {
+  cursor: default;
+  opacity: 0.65;
+}
+
 .msg-action-btn svg {
   flex-shrink: 0;
 }
@@ -772,7 +913,7 @@ body::before {
 }
 
 .stream-text th {
-  background: linear-gradient(135deg, rgba(124, 92, 252, 0.18) 0%, rgba(56, 189, 248, 0.08) 100%);
+  background: linear-gradient(135deg, rgba(124, 92, 252, 0.18) 0%, rgba(34, 197, 94, 0.08) 100%);
   color: var(--accent-bright);
   font-weight: 600;
   font-size: 12px;
@@ -978,7 +1119,7 @@ body::before {
   z-index: 0;
   background:
     radial-gradient(ellipse at 50% 30%, rgba(124, 92, 252, 0.12) 0%, transparent 60%),
-    radial-gradient(ellipse at 30% 70%, rgba(56, 189, 248, 0.06) 0%, transparent 50%),
+    radial-gradient(ellipse at 30% 70%, rgba(34, 197, 94, 0.065) 0%, transparent 50%),
     radial-gradient(ellipse at 70% 80%, rgba(167, 139, 250, 0.08) 0%, transparent 50%);
   animation: agentGlowPulse 4s ease-in-out infinite;
 }
@@ -1008,7 +1149,7 @@ body::before {
   font-size: 20px;
   font-weight: 700;
   letter-spacing: -0.02em;
-  background: linear-gradient(135deg, #e8e8ef 0%, var(--accent-bright) 50%, var(--cyan) 100%);
+  background: linear-gradient(135deg, #e8e8ef 0%, var(--accent-bright) 50%, var(--secondary-bright) 100%);
   background-size: 200% 200%;
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
@@ -1064,7 +1205,7 @@ body::before {
 .agent-running-ring.two {
   width: 46px;
   height: 46px;
-  border-color: rgba(56, 189, 248, 0.3);
+  border-color: var(--secondary-border);
   animation: orbitSpinReversePanel 3.2s linear infinite;
 }
 
@@ -1135,7 +1276,7 @@ body::before {
    AGENT THINKING BLOCK
    ═══════════════════════════════════════════════ */
 .agent-thinking {
-  background: linear-gradient(135deg, rgba(124, 92, 252, 0.05) 0%, rgba(56, 189, 248, 0.03) 100%);
+  background: linear-gradient(135deg, rgba(124, 92, 252, 0.05) 0%, rgba(34, 197, 94, 0.03) 100%);
   border: 1px solid rgba(124, 92, 252, 0.12);
   border-radius: var(--radius-md);
   padding: 0;
