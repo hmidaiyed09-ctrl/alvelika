@@ -16,6 +16,94 @@ if (typeof marked !== 'undefined') {
   marked.use({ renderer });
 }
 
+// ─── LaTeX / Math preprocessing & KaTeX rendering ───
+// Many models emit raw LaTeX (e.g. \wedge, w_{ij}, d_j = ...) without proper
+// $...$ delimiters. We auto-wrap such patterns so KaTeX can render them.
+function preprocessLatex(text) {
+  if (!text || typeof text !== 'string') return text;
+
+  // 1. Protect content that must NOT be touched (code blocks, inline code,
+  //    pre-existing math delimiters).
+  const saved = [];
+  const protect = (m) => {
+    saved.push(m);
+    return `\u0000${saved.length - 1}\u0000`;
+  };
+  let s = text;
+  s = s.replace(/```[\s\S]*?```/g, protect);
+  s = s.replace(/`[^`\n]+`/g, protect);
+  s = s.replace(/\$\$[\s\S]+?\$\$/g, protect);
+  s = s.replace(/(^|[^\\])\$([^\$\n]+)\$/g, (m, lead, body) => lead + protect('$' + body + '$'));
+  s = s.replace(/\\\([\s\S]+?\\\)/g, protect);
+  s = s.replace(/\\\[[\s\S]+?\\\]/g, protect);
+
+  // 2. Convert "[ ... ]" blocks (a line containing only "[", followed by math,
+  //    then a line containing only "]") into display-math $$ ... $$, and
+  //    protect the resulting block so internal tokens are not re-wrapped.
+  s = s.replace(/(^|\n)[ \t]*\[[ \t]*\n([\s\S]+?)\n[ \t]*\][ \t]*(?=\n|$)/g, (m, lead, body) => {
+    if (/\\[a-zA-Z]+|_\{|\^\{|[a-zA-Z]_[a-zA-Z0-9]/.test(body)) {
+      return `${lead}${protect('$$\n' + body.trim() + '\n$$')}`;
+    }
+    return m;
+  });
+
+  // 3. Wrap LaTeX command tokens: \wedge, \vee, \neg, \dots, \sum{...}, etc.
+  s = s.replace(/\\[a-zA-Z]+(?:\{[^}\n]*\})?/g, m => `$${m}$`);
+
+  // 4. Wrap subscript/superscript with braces: w_{ij}, x^{n}
+  s = s.replace(/[a-zA-Z]_\{[^}\n]+\}/g, m => `$${m}$`);
+  s = s.replace(/[a-zA-Z]\^\{[^}\n]+\}/g, m => `$${m}$`);
+
+  // 5. Wrap simple sub/superscripts: d_j, x_2, x^2
+  s = s.replace(/\b([a-zA-Z])_([a-zA-Z0-9])\b/g, '$$$1_$2$$');
+  s = s.replace(/\b([a-zA-Z])\^([a-zA-Z0-9])\b/g, '$$$1^$2$$');
+
+  // 6. Merge adjacent $...$ groups separated only by math-friendly chars
+  //    so e.g. "$d_j$ = $(w_{1j}$, $w_{2j}$, $\dots$, $w_{tj}$)" becomes
+  //    one continuous math expression.
+  let prev;
+  let guard = 0;
+  do {
+    prev = s;
+    s = s.replace(/\$([^\$\n]+)\$([ \t,=+\-*/.()\[\]]+)\$([^\$\n]+)\$/g, '$$$1$2$3$$');
+    guard++;
+  } while (s !== prev && guard < 20);
+
+  // 7. Restore protected segments.
+  s = s.replace(/\u0000(\d+)\u0000/g, (_, i) => saved[+i]);
+  return s;
+}
+
+function renderMarkdownWithMath(text, el) {
+  if (!el) return;
+  if (typeof marked === 'undefined') {
+    el.textContent = text || '';
+    return;
+  }
+  const processed = preprocessLatex(text || '');
+  el.innerHTML = marked.parse(processed);
+  applyKatex(el);
+}
+
+function applyKatex(el) {
+  if (!el || typeof renderMathInElement === 'undefined') return;
+  try {
+    renderMathInElement(el, {
+      delimiters: [
+        { left: '$$', right: '$$', display: true },
+        { left: '$', right: '$', display: false },
+        { left: '\\[', right: '\\]', display: true },
+        { left: '\\(', right: '\\)', display: false }
+      ],
+      throwOnError: false,
+      ignoredTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'],
+      output: 'html'
+    });
+  } catch (err) {
+    console.warn('KaTeX render failed:', err);
+  }
+}
+
 // ─── Global code copy listener ───
 document.addEventListener('click', (e) => {
   const btn = e.target.closest('.copy-btn');
@@ -85,11 +173,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const div = document.createElement('div');
         div.className = 'message ai stream-text';
         chatContainer.appendChild(div);
-        if (typeof marked !== 'undefined') {
-          div.innerHTML = marked.parse(msg.content);
-        } else {
-          div.textContent = msg.content;
-        }
+        renderMarkdownWithMath(msg.content, div);
       }
     }
     scrollToBottom();
@@ -508,10 +592,8 @@ function appendAIMessage(text, { stream = false, className = 'message ai stream-
 
   if (stream) {
     streamText(text, div);
-  } else if (typeof marked !== 'undefined') {
-    div.innerHTML = marked.parse(text);
   } else {
-    div.textContent = text;
+    renderMarkdownWithMath(text, div);
   }
 
   return div;
@@ -723,11 +805,7 @@ CRITICAL INSTRUCTIONS:
 
         const thinkingBody = document.createElement('div');
         thinkingBody.className = 'agent-thinking-body collapsed';
-        if (typeof marked !== 'undefined') {
-          thinkingBody.innerHTML = marked.parse(thinkingText);
-        } else {
-          thinkingBody.textContent = thinkingText;
-        }
+        renderMarkdownWithMath(thinkingText, thinkingBody);
         thinkingDiv.appendChild(thinkingBody);
 
         thinkingHeader.addEventListener('click', () => {
@@ -1609,6 +1687,7 @@ To act on an element, return its badge id. The program owns a map { id → eleme
 ═══ COMMANDS ═══
 
 - "click":     Click the element bound to "id".
+- "click_human": Use native browser debugging to simulate a physical hardware click. Use ONLY if normal "click" fails or you are explicitly told to use it.
 - "type":      Type "value" into the input bound to "id". Auto-focuses. Does NOT press Enter, does NOT submit.
 - "pressKey":  Press a key. "value" = key name. Optional "id" to focus before pressing.
 - "scroll":    "value" = "up" or "down". No id.
@@ -1692,6 +1771,45 @@ async function executeAgentCommandById(instruct) {
     }
   }
 
+  if (action === 'click_human') {
+    const id = Number(instruct.id);
+    if (!Number.isInteger(id) || id < 1) return { success: false, error: `Invalid id: ${instruct.id}` };
+    try {
+      // Get coordinates via content script
+      const results = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: (badgeId) => {
+          const map = (window.__alvelika && window.__alvelika.idMap) || null;
+          if (!map) return { success: false, errorType: 'no_id_map', error: 'Badge map missing.' };
+          const el = map.get(badgeId);
+          if (!el) return { success: false, errorType: 'id_not_found', error: `No element bound to id ${badgeId}.` };
+          if (!el.isConnected) return { success: false, errorType: 'stale_element', error: `Element for id ${badgeId} is detached.` };
+          try { el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch (e) {}
+          const rect = el.getBoundingClientRect();
+          return { success: true, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+        },
+        args: [id]
+      });
+      const res = results[0].result;
+      if (!res.success) return res;
+
+      // Dispatch native click via debugger
+      const target = { tabId: tab.id };
+      await chrome.debugger.attach(target, "1.3");
+      const x = Math.round(res.x);
+      const y = Math.round(res.y);
+      await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 });
+      await delay(50);
+      await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
+      await chrome.debugger.detach(target);
+      await delay(2000);
+      return { success: true, description: `Native human-click on id ${badgeId} at (${x}, ${y})` };
+    } catch (err) {
+      try { await chrome.debugger.detach({ tabId: tab.id }); } catch (e) {}
+      return { success: false, error: `Debugger error: ${err.message}. Make sure debugger permission is granted.` };
+    }
+  }
+
   if (action === 'click') {
     const id = Number(instruct.id);
     if (!Number.isInteger(id) || id < 1) return { success: false, error: `Invalid id: ${instruct.id}` };
@@ -1706,9 +1824,9 @@ async function executeAgentCommandById(instruct) {
           if (!el.isConnected) return { success: false, errorType: 'stale_element', error: `Element for id ${badgeId} is detached.` };
           try { el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch (e) {}
           el.focus();
-          el.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, cancelable: true, view: window }));
+          el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, view: window, pointerType: 'mouse' }));
           el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
-          el.dispatchEvent(new MouseEvent('pointerup', { bubbles: true, cancelable: true, view: window }));
+          el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, view: window, pointerType: 'mouse' }));
           el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
           el.click();
           return { success: true, description: `Clicked id ${badgeId}` };
@@ -1963,9 +2081,9 @@ async function executeAgentCommand(instruct) {
           if (!el) return { success: false, errorType: 'element_not_found', error: `Element not found: ${selector}` };
           try { el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch (e) {}
           el.focus();
-          el.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, cancelable: true, view: window }));
+          el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, view: window, pointerType: 'mouse' }));
           el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
-          el.dispatchEvent(new MouseEvent('pointerup', { bubbles: true, cancelable: true, view: window }));
+          el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, view: window, pointerType: 'mouse' }));
           el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
           el.click();
           return { success: true, description: `Clicked: ${selector}` };
@@ -2682,7 +2800,7 @@ async function handleAgentSend(userGoal) {
 
       // ── 8. Execute with retry guard ──
       const actionType = String(instruct.action).toLowerCase();
-      const sig = ['click', 'type', 'presskey'].includes(actionType)
+      const sig = ['click', 'click_human', 'type', 'presskey'].includes(actionType)
         ? `${actionType}:${instruct.id ?? ''}`
         : actionType === 'navigate'
           ? `navigate:${instruct.value || instruct.url || ''}`
@@ -2690,16 +2808,29 @@ async function handleAgentSend(userGoal) {
             ? `scroll:${(instruct.value || '').toLowerCase()}`
             : actionType;
 
-      const priorFailureCount = actionFailureCounts.get(sig) || 0;
-      let blockedReason = blockedActions.get(sig) || null;
       let result;
 
-      if (priorFailureCount >= AGENT_MAX_ACTION_RETRIES) {
-        blockedReason = blockedReason || `${sig} is blocked after ${AGENT_MAX_ACTION_RETRIES} failed attempts. Pick a different id or action.`;
-        blockedActions.set(sig, blockedReason);
-        result = { success: false, errorType: 'retry_limit_reached', error: blockedReason };
-      } else {
-        result = await executeAgentCommandById(instruct);
+      // Check if normal click has been tested twice
+      if (actionType === 'click') {
+        const clickIssuanceSig = `issued_click:${instruct.id}`;
+        const issuedCount = (actionFailureCounts.get(clickIssuanceSig) || 0) + 1;
+        actionFailureCounts.set(clickIssuanceSig, issuedCount);
+        if (issuedCount > 2) {
+          result = { success: false, error: "Normal click tested twice and failed to progress. You MUST use action 'click_human' with this id now." };
+        }
+      }
+
+      if (!result) {
+        const priorFailureCount = actionFailureCounts.get(sig) || 0;
+        let blockedReason = blockedActions.get(sig) || null;
+
+        if (priorFailureCount >= AGENT_MAX_ACTION_RETRIES) {
+          blockedReason = blockedReason || `${sig} is blocked after ${AGENT_MAX_ACTION_RETRIES} failed attempts. Pick a different id or action.`;
+          blockedActions.set(sig, blockedReason);
+          result = { success: false, errorType: 'retry_limit_reached', error: blockedReason };
+        } else {
+          result = await executeAgentCommandById(instruct);
+        }
       }
 
       if (result.success) {
@@ -2753,11 +2884,7 @@ function streamText(fullText, container, signal) {
     container.style.opacity = '0';
     container.style.transform = 'translateY(8px)';
 
-    if (typeof marked !== 'undefined') {
-      container.innerHTML = marked.parse(fullText);
-    } else {
-      container.textContent = fullText;
-    }
+    renderMarkdownWithMath(fullText, container);
 
     requestAnimationFrame(() => {
       container.style.transition = 'opacity 0.4s ease, transform 0.4s ease';

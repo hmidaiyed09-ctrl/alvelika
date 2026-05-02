@@ -7,7 +7,8 @@
     "sidePanel",
     "activeTab",
     "scripting",
-    "storage"
+    "storage",
+    "debugger"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -33,7 +34,7 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": ["logo.png"],
+      "resources": ["logo.png", "fonts/*", "katex.min.css"],
       "matches": ["<all_urls>"]
     }
   ],
