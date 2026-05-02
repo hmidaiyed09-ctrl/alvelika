@@ -425,17 +425,26 @@ body::before {
    STREAMED TEXT — Design-System Markdown
    ═══════════════════════════════════════════════ */
 .stream-text {
-  white-space: pre-wrap;
+  white-space: normal;
   word-break: break-word;
   color: var(--text-primary);
-  line-height: 1.7;
-  padding: 4px 0;
+  line-height: 1.5;
+  padding: 2px 0;
+}
+
+/* Preserve newlines only inside code/pre blocks */
+.stream-text pre,
+.stream-text code {
+  white-space: pre;
+}
+.stream-text pre code {
+  white-space: pre-wrap;
 }
 
 /* ── Paragraphs ── */
 .stream-text p {
   margin-top: 0;
-  margin-bottom: 14px;
+  margin-bottom: 6px;
   font-size: 13.5px;
 }
 
@@ -456,8 +465,8 @@ body::before {
 
 .stream-text h1 {
   font-size: 18px;
-  margin: 28px 0 12px 0;
-  padding-bottom: 10px;
+  margin: 18px 0 10px 0;
+  padding-bottom: 8px;
   border-bottom: 1px solid var(--border-subtle);
   background: linear-gradient(90deg, var(--text-bright) 0%, var(--accent-bright) 100%);
   -webkit-background-clip: text;
@@ -467,30 +476,37 @@ body::before {
 
 .stream-text h2 {
   font-size: 15.5px;
-  margin: 24px 0 10px 0;
+  margin: 16px 0 8px 0;
   padding-left: 12px;
   border-left: 3px solid var(--accent);
 }
 
 .stream-text h3 {
   font-size: 14px;
-  margin: 20px 0 8px 0;
+  margin: 14px 0 8px 0;
   color: var(--accent-bright);
   font-weight: 600;
+}
+
+/* A bit of breathing room between any heading and what immediately follows */
+.stream-text h1 + *,
+.stream-text h2 + *,
+.stream-text h3 + * {
+  margin-top: 6px;
 }
 
 /* Remove top-margin on the very first heading */
 .stream-text > h1:first-child,
 .stream-text > h2:first-child,
 .stream-text > h3:first-child {
-  margin-top: 4px;
+  margin-top: 2px;
 }
 
 /* ── Lists — styled bullets ── */
 .stream-text ul,
 .stream-text ol {
-  margin-top: 4px;
-  margin-bottom: 16px;
+  margin-top: 2px;
+  margin-bottom: 6px;
   padding-left: 8px;
   list-style: none;
 }
@@ -498,7 +514,7 @@ body::before {
 .stream-text ul > li {
   position: relative;
   padding-left: 18px;
-  margin-bottom: 8px;
+  margin-bottom: 2px;
   font-size: 13.5px;
 }
 
@@ -506,7 +522,7 @@ body::before {
   content: '';
   position: absolute;
   left: 0;
-  top: 8px;
+  top: 7px;
   width: 6px;
   height: 6px;
   border-radius: 50%;
@@ -523,8 +539,15 @@ body::before {
   counter-increment: list-counter;
   position: relative;
   padding-left: 28px;
-  margin-bottom: 8px;
+  margin-bottom: 2px;
   font-size: 13.5px;
+}
+
+/* Nested lists — keep them tight */
+.stream-text li > ul,
+.stream-text li > ol {
+  margin-top: 2px;
+  margin-bottom: 2px;
 }
 
 .stream-text ol > li::before {
@@ -563,10 +586,10 @@ body::before {
 /* ── Blockquote — card-style ── */
 .stream-text blockquote {
   border-left: 3px solid var(--accent);
-  padding: 12px 16px;
+  padding: 8px 14px;
   color: var(--text-secondary);
   font-style: italic;
-  margin: 16px 0;
+  margin: 8px 0;
   background: linear-gradient(135deg, rgba(124, 92, 252, 0.06) 0%, rgba(56, 189, 248, 0.03) 100%);
   border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
   font-size: 13px;
@@ -678,8 +701,12 @@ body::before {
   border: none;
   height: 1px;
   background: linear-gradient(90deg, transparent 0%, var(--border-light) 20%, var(--accent-soft) 50%, var(--border-light) 80%, transparent 100%);
-  margin: 24px 0;
+  margin: 12px 0;
 }
+
+/* Trim margins on first/last children so messages don't have leading/trailing gaps */
+.stream-text > *:first-child { margin-top: 0; }
+.stream-text > *:last-child  { margin-bottom: 0; }
 
 /* ── Tables — polished component ── */
 .stream-text table {
