@@ -19,7 +19,7 @@ if (typeof marked !== 'undefined') {
 // ─── LaTeX / Math preprocessing & KaTeX rendering ───
 // Many models emit raw LaTeX (e.g. \wedge, w_{ij}, d_j = ...) without proper
 // $...$ delimiters. We auto-wrap such patterns so KaTeX can render them.
-function preprocessLatex(text) {
+function preprocessLatexAndParse(text) {
   if (!text || typeof text !== 'string') return text;
 
   // 1. Protect content that must NOT be touched (code blocks, inline code,
@@ -75,9 +75,20 @@ function preprocessLatex(text) {
     guard++;
   } while (s !== prev && guard < 20);
 
+  // Protect all newly formed $...$ and $$...$$ before passing to marked
+  s = s.replace(/\$\$[\s\S]+?\$\$/g, protect);
+  s = s.replace(/(^|[^\\])\$([^\$\n]+)\$/g, (m, lead, body) => lead + protect('$' + body + '$'));
+
+  let html = marked.parse(s);
+
   // 7. Restore protected segments.
-  s = s.replace(/\u0000(\d+)\u0000/g, (_, i) => saved[+i]);
-  return s;
+  let prevHtml;
+  do {
+    prevHtml = html;
+    html = html.replace(/\u0000(\d+)\u0000/g, (_, i) => saved[+i]);
+  } while (html !== prevHtml);
+
+  return html;
 }
 
 function renderMarkdownWithMath(text, el) {
@@ -86,8 +97,7 @@ function renderMarkdownWithMath(text, el) {
     el.textContent = text || '';
     return;
   }
-  const processed = preprocessLatex(text || '');
-  el.innerHTML = marked.parse(processed);
+  el.innerHTML = preprocessLatexAndParse(text || '');
   applyKatex(el);
 }
 
