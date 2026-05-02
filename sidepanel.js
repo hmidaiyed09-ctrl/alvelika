@@ -37,15 +37,21 @@ function preprocessLatex(text) {
   s = s.replace(/\\\([\s\S]+?\\\)/g, protect);
   s = s.replace(/\\\[[\s\S]+?\\\]/g, protect);
 
-  // 2. Convert "[ ... ]" blocks (a line containing only "[", followed by math,
-  //    then a line containing only "]") into display-math $$ ... $$, and
-  //    protect the resulting block so internal tokens are not re-wrapped.
+  // 2a. Convert multi-line "[\n math \n]" blocks into display-math $$ ... $$.
   s = s.replace(/(^|\n)[ \t]*\[[ \t]*\n([\s\S]+?)\n[ \t]*\][ \t]*(?=\n|$)/g, (m, lead, body) => {
     if (/\\[a-zA-Z]+|_\{|\^\{|[a-zA-Z]_[a-zA-Z0-9]/.test(body)) {
       return `${lead}${protect('$$\n' + body.trim() + '\n$$')}`;
     }
     return m;
   });
+
+  // 2b. Convert inline "[ math ]" (LaTeX-style display brackets that appear
+  //    on the same line) into inline math.  Only triggers when the bracketed
+  //    content contains an unambiguous math indicator and no markdown link
+  //    target follows (no immediate "(" after the closing "]").
+  s = s.replace(/\[\s*([^\[\]\n]*?(?:\\[a-zA-Z]+|_\{[^}\n]+\}|\^\{[^}\n]+\})[^\[\]\n]*?)\s*\](?!\()/g,
+    (m, body) => protect('$' + body.trim() + '$')
+  );
 
   // 3. Wrap LaTeX command tokens: \wedge, \vee, \neg, \dots, \sum{...}, etc.
   s = s.replace(/\\[a-zA-Z]+(?:\{[^}\n]*\})?/g, m => `$${m}$`);
@@ -144,6 +150,8 @@ let selectedDocuments = []; // Array of { name, content }
 let conversationHistory = [];
 let agentModeActive = false;
 let deepThinkActive = false;
+let lastSystemPrompt = null;       // Remembered for regenerate
+let lastIsDeepThink = false;       // Remembered for regenerate
 // ─── Initialize Chat State ───
 document.addEventListener('DOMContentLoaded', async () => {
   const data = await chrome.storage.local.get(['conversationHistory']);
@@ -175,6 +183,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         chatContainer.appendChild(div);
         renderMarkdownWithMath(msg.content, div);
       }
+    }
+    // Add regenerate/copy buttons to the most recent AI message in history
+    const aiMessages = chatContainer.querySelectorAll('.message.ai.stream-text');
+    if (aiMessages.length > 0) {
+      addMessageActions(aiMessages[aiMessages.length - 1]);
     }
     scrollToBottom();
   }
@@ -599,6 +612,170 @@ function appendAIMessage(text, { stream = false, className = 'message ai stream-
   return div;
 }
 
+// ─── Regenerate / Message Actions ───────────────────────────
+function addMessageActions(answerDiv) {
+  if (!answerDiv || answerDiv.querySelector(':scope > .message-actions')) return;
+
+  const actions = document.createElement('div');
+  actions.className = 'message-actions';
+
+  const regenBtn = document.createElement('button');
+  regenBtn.className = 'msg-action-btn regenerate-btn';
+  regenBtn.title = 'Regenerate response';
+  regenBtn.innerHTML = `
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <polyline points="23 4 23 10 17 10"></polyline>
+      <polyline points="1 20 1 14 7 14"></polyline>
+      <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"></path>
+      <path d="M20.49 15a9 9 0 0 1-14.85 3.36L1 14"></path>
+    </svg>
+    <span>Regenerate</span>
+  `;
+  regenBtn.addEventListener('click', () => regenerateLastAssistantMessage(answerDiv));
+  actions.appendChild(regenBtn);
+
+  const copyBtn = document.createElement('button');
+  copyBtn.className = 'msg-action-btn copy-msg-btn';
+  copyBtn.title = 'Copy message';
+  copyBtn.innerHTML = `
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+    </svg>
+    <span>Copy</span>
+  `;
+  copyBtn.addEventListener('click', () => {
+    const text = answerDiv.innerText.replace(/\n?Regenerate\n?Copy\n?$/, '').trim();
+    navigator.clipboard.writeText(text);
+    const originalHTML = copyBtn.innerHTML;
+    copyBtn.innerHTML = '<span>Copied!</span>';
+    setTimeout(() => (copyBtn.innerHTML = originalHTML), 1500);
+  });
+  actions.appendChild(copyBtn);
+
+  answerDiv.appendChild(actions);
+}
+
+async function regenerateLastAssistantMessage(answerDiv) {
+  // Don't allow regenerating while another request is in flight
+  if (currentAbortController) return;
+
+  // Remove the last assistant entry from conversation history
+  const lastIdx = conversationHistory.map(m => m.role).lastIndexOf('assistant');
+  if (lastIdx < 0) return;
+  conversationHistory.splice(lastIdx, 1);
+  chrome.storage.local.set({ conversationHistory });
+
+  // Remove this AI message from the DOM (and any thinking block right above it)
+  const prev = answerDiv.previousElementSibling;
+  if (prev && prev.classList.contains('agent-thinking')) prev.remove();
+  answerDiv.remove();
+
+  const apiConfig = await getApiConfig();
+  if (!apiConfig) {
+    appendAIMessage('Error: Configure your AI provider in Settings first.', { className: 'message ai' });
+    return;
+  }
+
+  const systemPrompt = lastSystemPrompt
+    || 'You are Alvelika, a helpful AI assistant. Continue the conversation naturally.';
+  const isDeepThink = lastIsDeepThink;
+
+  const thinkingEl = createThinkingState('Regenerating…');
+  chatContainer.appendChild(thinkingEl);
+  scrollToBottom();
+
+  currentAbortController = new AbortController();
+  showAgentRunningUI();
+
+  try {
+    // Boost the system prompt with an explicit "give me a NEW answer" instruction
+    // and use a high temperature + random seed so the model actually varies output.
+    const variants = [
+      'Provide a fresh, alternative explanation. Use different wording, structure, examples, or perspective. Do NOT repeat the previous answer verbatim.',
+      'Re-answer this with a different approach: vary the structure, examples, and phrasing. Try a new angle. Avoid copying any phrasing from the prior reply.',
+      'Generate a substantially different response. Pick a different framing, ordering, or set of examples than before. Aim for fresh insight.',
+      'Try again with notably different wording and structure. If the previous answer used a list, write prose; if it used prose, use a list. Bring new examples.'
+    ];
+    const variantInstruction = variants[Math.floor(Math.random() * variants.length)];
+    const augmentedSystem = `${systemPrompt}\n\nREGENERATION REQUEST: The user pressed "Regenerate" because they want a different answer. ${variantInstruction}`;
+
+    const messages = [
+      { role: 'system', content: augmentedSystem },
+      ...conversationHistory
+    ];
+    const seed = Math.floor(Math.random() * 1_000_000_000);
+    const rawResult = await callLLM(
+      apiConfig,
+      messages,
+      currentAbortController.signal,
+      { temperature: 1.0, top_p: 0.95, seed }
+    );
+
+    if (isDeepThink) {
+      let thinkingText = '';
+      let finalAnswer = '';
+      const thoughtMatch = rawResult.match(/<thought>([\s\S]*?)<\/thought>/i);
+      if (thoughtMatch) thinkingText = thoughtMatch[1].trim();
+      const answerMatch = rawResult.match(/<answer>([\s\S]*?)<\/answer>/i);
+      finalAnswer = answerMatch
+        ? answerMatch[1].trim()
+        : rawResult.replace(/<thought>[\s\S]*?<\/thought>/gi, '').replace(/<\/?answer>/gi, '').trim();
+
+      await fadeOutAndRemove(thinkingEl, 400);
+
+      if (thinkingText) {
+        const thinkingDiv = document.createElement('div');
+        thinkingDiv.className = 'message ai agent-thinking';
+        const thinkingHeader = document.createElement('div');
+        thinkingHeader.className = 'agent-thinking-header';
+        thinkingHeader.innerHTML = `<span class="agent-thinking-icon">🧠</span> <span>Deep Thinking</span> <span class="agent-thinking-toggle">▶</span>`;
+        thinkingDiv.appendChild(thinkingHeader);
+        const thinkingBody = document.createElement('div');
+        thinkingBody.className = 'agent-thinking-body collapsed';
+        renderMarkdownWithMath(thinkingText, thinkingBody);
+        thinkingDiv.appendChild(thinkingBody);
+        thinkingHeader.addEventListener('click', () => {
+          thinkingBody.classList.toggle('collapsed');
+          thinkingHeader.querySelector('.agent-thinking-toggle').textContent =
+            thinkingBody.classList.contains('collapsed') ? '▶' : '▼';
+        });
+        chatContainer.appendChild(thinkingDiv);
+        scrollToBottom();
+      }
+
+      const newDiv = document.createElement('div');
+      newDiv.className = 'message ai stream-text';
+      chatContainer.appendChild(newDiv);
+      conversationHistory.push({ role: 'assistant', content: rawResult });
+      chrome.storage.local.set({ conversationHistory });
+      await streamText(finalAnswer || rawResult, newDiv, currentAbortController.signal);
+      addMessageActions(newDiv);
+    } else {
+      await fadeOutAndRemove(thinkingEl, 400);
+      const newDiv = document.createElement('div');
+      newDiv.className = 'message ai stream-text';
+      chatContainer.appendChild(newDiv);
+      conversationHistory.push({ role: 'assistant', content: rawResult });
+      chrome.storage.local.set({ conversationHistory });
+      await streamText(rawResult, newDiv, currentAbortController.signal);
+      addMessageActions(newDiv);
+    }
+  } catch (err) {
+    if (err.name === 'AbortError' || (err.message && err.message.includes('aborted'))) {
+      thinkingEl.textContent = 'Regeneration stopped.';
+    } else {
+      thinkingEl.textContent = `Error: ${err.message}`;
+      console.error('Regenerate failed:', err);
+    }
+  } finally {
+    hideAgentRunningView();
+    currentAbortController = null;
+  }
+}
+
 // ─── Shared: Build API config from saved settings ────────
 async function getApiConfig() {
   const config = await new Promise((resolve) => {
@@ -642,11 +819,17 @@ async function getApiConfig() {
 }
 
 // ─── Shared: Make an LLM API call ────────────────────────
-async function callLLM(apiConfig, messages, signal) {
+async function callLLM(apiConfig, messages, signal, extra = {}) {
+  const body = {
+    model: apiConfig.model,
+    messages,
+    stream: false,
+    ...extra
+  };
   const response = await fetch(apiConfig.baseUrl, {
     method: 'POST',
     headers: apiConfig.headers,
-    body: JSON.stringify({ model: apiConfig.model, messages, stream: false }),
+    body: JSON.stringify(body),
     signal
   });
   if (!response.ok) {
@@ -764,6 +947,10 @@ CRITICAL INSTRUCTIONS:
   conversationHistory.push({ role: 'user', content: userContent });
   chrome.storage.local.set({ conversationHistory });
 
+  // Remember system prompt + mode for the Regenerate action
+  lastSystemPrompt = systemPrompt;
+  lastIsDeepThink = !!isDeepThink;
+
   const messages = [
     { role: 'system', content: systemPrompt },
     ...conversationHistory
@@ -829,6 +1016,7 @@ CRITICAL INSTRUCTIONS:
       conversationHistory.push({ role: 'assistant', content: rawResult });
       chrome.storage.local.set({ conversationHistory });
       await streamText(finalAnswer, answerDiv, currentAbortController.signal);
+      addMessageActions(answerDiv);
 
     } else {
       await fadeOutAndRemove(thinkingEl, 400);
@@ -839,6 +1027,7 @@ CRITICAL INSTRUCTIONS:
       conversationHistory.push({ role: 'assistant', content: rawResult });
       chrome.storage.local.set({ conversationHistory });
       await streamText(rawResult, answerDiv, currentAbortController.signal);
+      addMessageActions(answerDiv);
     }
 
   } catch (err) {
