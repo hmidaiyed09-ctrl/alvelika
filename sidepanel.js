@@ -2,7 +2,8 @@
 if (typeof marked !== 'undefined') {
   marked.setOptions({
     breaks: true,
-    gfm: true
+    gfm: true,
+    html: true
   });
   
   const renderer = {
@@ -102,6 +103,11 @@ function preprocessLatexAndParse(text) {
 
   // 6. Parse with marked
   let html = marked.parse(s);
+
+  // 6a. Support for custom color tags: <red>, <green>, <rose> (handles both raw and escaped)
+  html = html.replace(/(?:&lt;red&gt;|<red>)([\s\S]*?)(?:&lt;\/red&gt;|<\/red>)/gi, '<span class="color-red">$1</span>');
+  html = html.replace(/(?:&lt;green&gt;|<green>)([\s\S]*?)(?:&lt;\/green&gt;|<\/green>)/gi, '<span class="color-green">$1</span>');
+  html = html.replace(/(?:&lt;rose&gt;|<rose>)([\s\S]*?)(?:&lt;\/rose&gt;|<\/rose>)/gi, '<span class="color-rose">$1</span>');
 
   // 7. Restore MATH segments.
   let prevHtml;
@@ -587,29 +593,74 @@ const imagePreviewContainer = document.getElementById('image-preview-container')
 const agentModeButton = document.getElementById('agent-mode-button');
 const deepThinkButton = document.getElementById('deep-think-button');
 const stopAgentButton = document.getElementById('stop-agent-button');
+const historyButton = document.getElementById('history-button');
+const historyDrawer = document.getElementById('history-drawer');
+const closeHistory = document.getElementById('close-history');
+const historyList = document.getElementById('history-list');
+const drawerOverlay = document.getElementById('drawer-overlay');
 
 let userHasScrolledUp = false;
 let selectedImages = [];
 let selectedDocuments = []; // Array of { name, content }
 let conversationHistory = [];
+let activeChatId = null;
+let allChats = {}; // { id: { id, name, timestamp, messages } }
 let agentModeActive = false;
 let deepThinkActive = false;
 let lastSystemPrompt = null;       // Remembered for regenerate
 let lastIsDeepThink = false;       // Remembered for regenerate
 // ─── Initialize Chat State ───
 document.addEventListener('DOMContentLoaded', async () => {
-  const data = await chrome.storage.local.get(['conversationHistory']);
-  if (data.conversationHistory && Array.isArray(data.conversationHistory) && data.conversationHistory.length > 0) {
-    conversationHistory = data.conversationHistory;
-    
-    // Hide welcome message
-    const welcome = chatContainer.querySelector('.welcome');
-    if (welcome) welcome.remove();
+  const data = await chrome.storage.local.get(['activeChatId', 'allChats', 'conversationHistory']);
+  
+  // Migration logic: if someone has an old conversationHistory but no allChats
+  if (data.conversationHistory && (!data.allChats || Object.keys(data.allChats).length === 0)) {
+    const id = 'chat_' + Date.now();
+    activeChatId = id;
+    allChats[id] = {
+      id,
+      name: 'Previous Conversation',
+      timestamp: Date.now(),
+      messages: data.conversationHistory
+    };
+    await chrome.storage.local.set({ allChats, activeChatId });
+  } else {
+    allChats = data.allChats || {};
+    activeChatId = data.activeChatId || null;
+  }
 
-    // Re-render history
+  if (activeChatId && allChats[activeChatId]) {
+    loadChat(activeChatId);
+  } else {
+    renderWelcome();
+  }
+  
+  renderHistoryList();
+});
+
+function renderWelcome() {
+  chatContainer.innerHTML = `
+    <div class="welcome">
+      <img src="logo.png" alt="" class="welcome-logo">
+      <p class="welcome-text">What can I help you with?</p>
+    </div>
+  `;
+}
+
+function loadChat(chatId) {
+  const chat = allChats[chatId];
+  if (!chat) return;
+
+  activeChatId = chatId;
+  conversationHistory = chat.messages || [];
+  
+  chatContainer.innerHTML = '';
+  
+  if (conversationHistory.length === 0) {
+    renderWelcome();
+  } else {
     for (const msg of conversationHistory) {
       if (msg.role === 'user') {
-        // Handle potential array format for user content (text + images)
         let textContent = '';
         let imgContent = null;
         if (Array.isArray(msg.content)) {
@@ -620,7 +671,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         } else {
           textContent = msg.content;
         }
-        appendUserMessage(textContent, imgContent, false); // false prevents saving again
+        appendUserMessage(textContent, imgContent, false);
       } else if (msg.role === 'assistant') {
         const div = document.createElement('div');
         div.className = 'message ai stream-text';
@@ -628,14 +679,138 @@ document.addEventListener('DOMContentLoaded', async () => {
         renderMarkdownWithMath(msg.content, div);
       }
     }
-    // Add regenerate/copy buttons to the most recent AI message in history
+    // Add actions to last AI message
     const aiMessages = chatContainer.querySelectorAll('.message.ai.stream-text');
     if (aiMessages.length > 0) {
       addMessageActions(aiMessages[aiMessages.length - 1]);
     }
-    scrollToBottom();
   }
-});
+  
+  scrollToBottom(true);
+  renderHistoryList();
+  chrome.storage.local.set({ activeChatId });
+}
+
+async function createNewChat() {
+  const id = 'chat_' + Date.now();
+  const newChat = {
+    id,
+    name: 'New Chat',
+    timestamp: Date.now(),
+    messages: []
+  };
+  
+  allChats[id] = newChat;
+  activeChatId = id;
+  
+  await chrome.storage.local.set({ allChats, activeChatId });
+  loadChat(id);
+  
+  if (historyDrawer.classList.contains('open')) {
+    toggleHistoryDrawer();
+  }
+}
+
+async function saveCurrentChat() {
+  if (!activeChatId) {
+    activeChatId = 'chat_' + Date.now();
+    allChats[activeChatId] = {
+      id: activeChatId,
+      name: 'New Chat',
+      timestamp: Date.now(),
+      messages: []
+    };
+  }
+  
+  allChats[activeChatId].messages = conversationHistory;
+  allChats[activeChatId].timestamp = Date.now();
+  
+  await chrome.storage.local.set({ allChats, activeChatId });
+  renderHistoryList();
+}
+
+async function deleteChat(chatId, e) {
+  if (e) e.stopPropagation();
+  
+  delete allChats[chatId];
+  
+  if (activeChatId === chatId) {
+    activeChatId = Object.keys(allChats)[0] || null;
+    if (activeChatId) {
+      loadChat(activeChatId);
+    } else {
+      conversationHistory = [];
+      renderWelcome();
+      renderHistoryList();
+    }
+  } else {
+    renderHistoryList();
+  }
+  
+  await chrome.storage.local.set({ allChats, activeChatId });
+}
+
+function renderHistoryList() {
+  historyList.innerHTML = '';
+  
+  const sortedIds = Object.keys(allChats).sort((a, b) => allChats[b].timestamp - allChats[a].timestamp);
+  
+  if (sortedIds.length === 0) {
+    historyList.innerHTML = '<div class="history-empty">No conversations yet</div>';
+    return;
+  }
+  
+  for (const id of sortedIds) {
+    const chat = allChats[id];
+    const item = document.createElement('div');
+    item.className = `history-item ${id === activeChatId ? 'active' : ''}`;
+    
+    const date = new Date(chat.timestamp).toLocaleDateString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    
+    // Find the latest user or assistant message to show as a snippet
+    let lastMsgSnippet = '';
+    if (chat.messages && chat.messages.length > 0) {
+      const lastMsg = chat.messages[chat.messages.length - 1];
+      let content = '';
+      if (Array.isArray(lastMsg.content)) {
+        const textItem = lastMsg.content.find(i => i.type === 'text');
+        content = textItem ? textItem.text : (lastMsg.role === 'user' ? 'Image attachment' : 'Thinking...');
+      } else {
+        content = lastMsg.content;
+      }
+      lastMsgSnippet = content.replace(/<thought>[\s\S]*?<\/thought>/gi, '').replace(/<\/?answer>/gi, '').substring(0, 60).trim() + (content.length > 60 ? '...' : '');
+    }
+
+    item.innerHTML = `
+      <div class="history-item-title">${chat.name}</div>
+      <div class="history-item-snippet">${lastMsgSnippet}</div>
+      <div class="history-item-date">${date}</div>
+      <div class="history-item-actions">
+        <button class="history-action-btn delete" title="Delete">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+        </button>
+      </div>
+    `;
+    
+    item.addEventListener('click', () => {
+      loadChat(id);
+      toggleHistoryDrawer();
+    });
+    
+    item.querySelector('.delete').addEventListener('click', (e) => deleteChat(id, e));
+    
+    historyList.appendChild(item);
+  }
+}
+
+function toggleHistoryDrawer() {
+  const isOpen = historyDrawer.classList.toggle('open');
+  drawerOverlay.classList.toggle('open', isOpen);
+}
+
+historyButton.addEventListener('click', toggleHistoryDrawer);
+closeHistory.addEventListener('click', toggleHistoryDrawer);
+drawerOverlay.addEventListener('click', toggleHistoryDrawer);
 
 // Deep Think toggle
 deepThinkButton.addEventListener('click', () => {
@@ -665,7 +840,8 @@ chatContainer.addEventListener('scroll', () => {
   userHasScrolledUp = distanceFromBottom > 60;
 });
 
-function scrollToBottom() {
+function scrollToBottom(force = false) {
+  if (force) userHasScrolledUp = false;
   if (!userHasScrolledUp) {
     chatContainer.scrollTo({ top: chatContainer.scrollHeight, behavior: 'smooth' });
   }
@@ -716,16 +892,7 @@ settingsButton.addEventListener('click', () => {
 
 // Clear Chat logic
 clearButton.addEventListener('click', () => {
-  chatContainer.innerHTML = '';
-  conversationHistory = [];
-  chrome.storage.local.remove(['conversationHistory']);
-  const welcome = document.createElement('div');
-  welcome.className = 'welcome';
-  welcome.innerHTML = `
-    <img src="logo.png" alt="" class="welcome-logo">
-    <p class="welcome-text">What can I help you with?</p>
-  `;
-  chatContainer.appendChild(welcome);
+  createNewChat();
 });
 
 // Image Upload Logic
@@ -843,6 +1010,11 @@ async function handleSend() {
   const hasImages = selectedImages.some(img => img !== null);
   if (!text && !hasImages && currentDocs.length === 0) return;
 
+  // Ensure we have an active chat ID
+  if (!activeChatId) {
+    await createNewChat();
+  }
+
   // Hide welcome if present
   const welcome = chatContainer.querySelector('.welcome');
   if (welcome) welcome.remove();
@@ -860,6 +1032,8 @@ async function handleSend() {
     }
   }
   appendUserMessage(uiMessageText, currentImages.length > 0 ? currentImages[0] : null);
+
+  const isFirstMessage = conversationHistory.length === 1; // It was 0, now it has 1 user message
 
   // Clear input and previews
   chatInput.value = '';
@@ -881,12 +1055,9 @@ async function handleSend() {
   let pageContext = 'No context available.';
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-
-    // Check if it's a restricted Chrome page
     if (tab && tab.id && tab.url && (tab.url.startsWith('chrome://') || tab.url.startsWith('edge://') || tab.url.startsWith('about:'))) {
       pageContext = "The user is on a restricted browser page (like a New Tab). You cannot see this page.";
     }
-    // If it's a normal website, aggressively scrape it
     else if (tab && tab.id) {
       const injectionResults = await chrome.scripting.executeScript({
         target: { tabId: tab.id },
@@ -895,11 +1066,7 @@ async function handleSend() {
           const article = document.querySelector('article');
           const main = document.querySelector('main') || document.querySelector('[role="main"]');
           const root = article || main || document.body;
-
-          // Smart Cascading Fallback
           text = root.innerText;
-
-          // Extract sections by headings
           const sections = [];
           const headings = root.querySelectorAll('h1, h2, h3, h4, h5, h6');
           headings.forEach((h, i) => {
@@ -917,8 +1084,6 @@ async function handleSend() {
               });
             }
           });
-
-          // If no headings, chunk by paragraphs
           if (sections.length === 0) {
             const paragraphs = root.querySelectorAll('p');
             let chunk = '';
@@ -943,7 +1108,6 @@ async function handleSend() {
               });
             }
           }
-
           return {
             title: document.title,
             text: text.substring(0, 15000),
@@ -951,7 +1115,6 @@ async function handleSend() {
           };
         }
       });
-
       if (injectionResults && injectionResults[0] && injectionResults[0].result) {
         const result = injectionResults[0].result;
         pageContext = `[Context of active page: ${result.title}]\n\n${result.text}`;
@@ -962,7 +1125,6 @@ async function handleSend() {
     pageContext = "Error extracting context. Assume general conversation.";
   }
 
-  // Capture screenshot of the active tab (skip when PDF is attached — not relevant)
   let screenshotUrl = null;
   if (currentDocs.length === 0) {
     try {
@@ -975,10 +1137,9 @@ async function handleSend() {
     }
   }
 
-  // Show thinking
   const thinkingEl = createThinkingState();
   chatContainer.appendChild(thinkingEl);
-  scrollToBottom();
+  scrollToBottom(true);
 
   let finalMessageToAI = uiMessageText;
   if (currentDocs.length > 0) {
@@ -988,6 +1149,38 @@ async function handleSend() {
   }
 
   await processLLMResponse(finalMessageToAI, pageContext, thinkingEl, currentImages, screenshotUrl, deepThinkActive);
+
+  // Trigger auto-naming after the first AI response
+  if (isFirstMessage) {
+    if (allChats[activeChatId].name === 'New Chat') {
+      // Set immediate title from user message
+      const snippet = text.substring(0, 40).trim() + (text.length > 40 ? '...' : '');
+      allChats[activeChatId].name = snippet || 'Image/Doc Chat';
+      renderHistoryList();
+    }
+    // Then let AI refine it in the background
+    generateChatTitle(activeChatId, text);
+  }
+}
+
+async function generateChatTitle(chatId, firstUserMessage) {
+  const apiConfig = await getApiConfig();
+  if (!apiConfig) return;
+
+  try {
+    const messages = [
+      { role: 'system', content: 'Generate a short, concise 3-5 word title for a conversation based on the user’s first message. Reply with ONLY the title. No quotes, no preamble.' },
+      { role: 'user', content: firstUserMessage }
+    ];
+    const title = await callLLM(apiConfig, messages, null);
+    if (title && title.length < 60) {
+      allChats[chatId].name = title.replace(/^"|"$/g, '').trim();
+      await chrome.storage.local.set({ allChats });
+      renderHistoryList();
+    }
+  } catch (err) {
+    console.warn('Could not auto-generate title:', err);
+  }
 }
 
 function appendUserMessage(text, imageUrl, saveToHistory = true) {
@@ -1008,7 +1201,16 @@ function appendUserMessage(text, imageUrl, saveToHistory = true) {
   }
 
   chatContainer.appendChild(div);
-  scrollToBottom();
+  scrollToBottom(true);
+
+  if (saveToHistory) {
+    const msgObj = imageUrl 
+      ? { role: 'user', content: [{ type: 'text', text: text || '' }, { type: 'image_url', image_url: { url: imageUrl } }] }
+      : { role: 'user', content: text };
+    
+    conversationHistory.push(msgObj);
+    saveCurrentChat();
+  }
 }
 
 function createThinkingState(initialText = 'thinking…') {
@@ -1239,7 +1441,7 @@ async function regenerateLastAssistantMessage(answerDiv) {
   const lastIdx = conversationHistory.map(m => m.role).lastIndexOf('assistant');
   if (lastIdx < 0) return;
   conversationHistory.splice(lastIdx, 1);
-  chrome.storage.local.set({ conversationHistory });
+  saveCurrentChat();
 
   // Remove this AI message from the DOM (and any thinking block right above it)
   const prev = answerDiv.previousElementSibling;
@@ -1328,7 +1530,7 @@ async function regenerateLastAssistantMessage(answerDiv) {
       newDiv.__screenExplanation = screenExplanation;
       chatContainer.appendChild(newDiv);
       conversationHistory.push({ role: 'assistant', content: responseText });
-      chrome.storage.local.set({ conversationHistory });
+      saveCurrentChat();
       await streamText(finalAnswer || responseText, newDiv, currentAbortController.signal);
       addMessageActions(newDiv);
       if (screenExplanations?.length) showScreenExplanationOnPage(null, screenExplanations);
@@ -1340,7 +1542,7 @@ async function regenerateLastAssistantMessage(answerDiv) {
       newDiv.__screenExplanation = screenExplanation;
       chatContainer.appendChild(newDiv);
       conversationHistory.push({ role: 'assistant', content: responseText });
-      chrome.storage.local.set({ conversationHistory });
+      saveCurrentChat();
       await streamText(responseText, newDiv, currentAbortController.signal);
       addMessageActions(newDiv);
       if (screenExplanations?.length) showScreenExplanationOnPage(null, screenExplanations);
@@ -1510,7 +1712,7 @@ CRITICAL INSTRUCTIONS:
 3. Inside <answer>, write your final response informed by all 12 answers above.
 4. PROVE YOU ARE WATCHING: If the page is relevant, mention a specific detail from the page (like the title, a name, or a fact).
 5. BE KIND & ELEGANT: Use Markdown (###, **, -) to make the answer beautiful. NO EMOJIS ALLOWED.
-6. FORMATTING DISCIPLINE: Do not use raw HTML colors. Use bold sparingly for meaningful terms. Put important equations in display math with $$...$$, especially formulas that define a result or method.`
+6. FORMATTING DISCIPLINE: Use Markdown (###, **, -) for structure. You can highlight key terms using custom color tags: <red>text</red>, <green>text</green>, or <rose>text</rose>. Use these for emphasis or status. Do not use other HTML colors. Put important equations in display math with $$...$$, especially formulas that define a result or method.`
     : `You are Alvelika, a dedicated educational AI assistant designed to help students deeply understand documents and web pages.
 You are "watching" the screen with the student. You receive both the page's text AND a screenshot of what they currently see.
 You are part of a persistent chat session. The user may switch between normal chat and "Agent mode" (where you autonomously perform browser actions). The conversation history below contains ALL messages — including agent task requests, agent results, and agent interruptions. Use this history to understand what has happened so far.
@@ -1526,7 +1728,7 @@ CRITICAL INSTRUCTIONS:
 3. PROVE YOU ARE WATCHING: When relevant, explicitly mention specific details, terms, or phrases from the page context to anchor your explanations in what the student is actively looking at.
 4. BE KIND, ENCOURAGING & ELEGANT: Use a supportive, teacher-like tone. Use Markdown (###, **, -) to make the answer beautiful and easy to read. YOU MUST NOT USE ANY EMOJIS (NO SMILEYS, NO ICONS) UNDER ANY CIRCUMSTANCES.
 5. If the conversation history contains agent results, you are aware of what happened and can reference those results naturally.
-6. FORMATTING DISCIPLINE: Do not use raw HTML colors. Use bold sparingly for meaningful terms. Put important equations in display math with $$...$$, especially formulas that define a result or method.
+6. FORMATTING DISCIPLINE: Use Markdown (###, **, -) for structure. You can highlight key terms using custom color tags: <red>text</red>, <green>text</green>, or <rose>text</rose>. Use these for emphasis or status. Do not use other HTML colors. Put important equations in display math with $$...$$, especially formulas that define a result or method.
 7. OPTIONAL SCREEN ANNOTATIONS: If the user asks where something is on the page, or asks you to explain/walk through the page interface, annotate elements visually using one of the two formats below. Use ONLY for elements on the active webpage — never for Alvelika's own side panel.
 
 FOR A SINGLE ELEMENT — append exactly one block after your answer:
@@ -1619,7 +1821,7 @@ RULES FOR BOTH FORMATS:
       answerDiv.__screenExplanation = screenExplanation;
       chatContainer.appendChild(answerDiv);
       conversationHistory.push({ role: 'assistant', content: responseText });
-      chrome.storage.local.set({ conversationHistory });
+      saveCurrentChat();
       await streamText(finalAnswer, answerDiv, currentAbortController.signal);
       addMessageActions(answerDiv);
       if (screenExplanations?.length) showScreenExplanationOnPage(null, screenExplanations);
@@ -1633,7 +1835,7 @@ RULES FOR BOTH FORMATS:
       answerDiv.__screenExplanation = screenExplanation;
       chatContainer.appendChild(answerDiv);
       conversationHistory.push({ role: 'assistant', content: responseText });
-      chrome.storage.local.set({ conversationHistory });
+      saveCurrentChat();
       await streamText(responseText, answerDiv, currentAbortController.signal);
       addMessageActions(answerDiv);
       if (screenExplanations?.length) showScreenExplanationOnPage(null, screenExplanations);
