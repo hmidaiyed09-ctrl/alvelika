@@ -1034,6 +1034,84 @@ function appendAIMessage(text, { stream = false, className = 'message ai stream-
   return div;
 }
 
+// ─── On-demand screen annotation generator ──────────────────
+// Called when the user clicks "Show on page" and no AI-generated
+// annotation was stored on the message div. Makes a targeted API
+// call to produce an accurate, element-specific callout.
+async function generateScreenAnnotationForMessage(answerDiv) {
+  const apiConfig = await getApiConfig();
+  if (!apiConfig) return null;
+
+  const answerText = getCleanAnswerText(answerDiv).substring(0, 800);
+
+  // Collect visible interactive elements from the current page for context
+  let pageContext = '';
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (tab?.id && !tab.url?.startsWith('chrome://') && !tab.url?.startsWith('edge://')) {
+      const res = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: () => {
+          const labels = Array.from(
+            document.querySelectorAll('button, a[href], input, [role="button"], [role="tab"], [role="menuitem"]')
+          )
+            .filter(el => {
+              const r = el.getBoundingClientRect();
+              return r.width > 8 && r.height > 8;
+            })
+            .slice(0, 40)
+            .map(el =>
+              el.getAttribute('aria-label') ||
+              el.getAttribute('title') ||
+              el.textContent?.trim()
+            )
+            .filter(Boolean)
+            .map(s => s.substring(0, 50));
+          return { title: document.title, labels: [...new Set(labels)].join(', ') };
+        }
+      });
+      if (res?.[0]?.result) {
+        const { title, labels } = res[0].result;
+        pageContext = `Current page: "${title}"\nVisible interactive elements: ${labels}`;
+      }
+    }
+  } catch (e) { /* silently skip */ }
+
+  try {
+    const messages = [
+      {
+        role: 'system',
+        content: `You are Alvelika. A user clicked "Show on page" for an AI response. Your job is to identify the single most relevant visible page element that the response refers to.
+
+Return ONLY valid JSON — no markdown, no explanation:
+{"target":"exact visible label or aria-label of the element","title":"short title (≤ 8 words)","body":"One precise sentence about this specific element only.","kind":"concept|action|result|caution"}
+
+If the response does not clearly refer to any specific visible element, return:
+{"target":"","title":"","body":"","kind":"default"}`
+      },
+      {
+        role: 'user',
+        content: `AI response:\n${answerText}\n\n${pageContext}`
+      }
+    ];
+
+    const raw = await callLLM(apiConfig, messages, null);
+    const cleaned = raw.trim().replace(/^```(?:json)?/i, '').replace(/```$/i, '').trim();
+    const parsed = JSON.parse(cleaned);
+
+    if (!parsed.target || !parsed.title) return null;
+    return {
+      target: String(parsed.target).trim().substring(0, 90),
+      title: String(parsed.title).trim().substring(0, 90),
+      body: String(parsed.body || '').trim().substring(0, 420),
+      kind: ['concept', 'action', 'result', 'caution'].includes(String(parsed.kind)) ? parsed.kind : 'default'
+    };
+  } catch (e) {
+    console.warn('Could not generate screen annotation on demand:', e);
+    return null;
+  }
+}
+
 // ─── Regenerate / Message Actions ───────────────────────────
 function addMessageActions(answerDiv) {
   if (!answerDiv || answerDiv.querySelector(':scope > .message-actions')) return;
@@ -1061,12 +1139,30 @@ function addMessageActions(answerDiv) {
     const label = screenBtn.querySelector('span');
     const originalLabel = label?.textContent || 'Show on page';
     screenBtn.disabled = true;
+
+    // Use the AI-generated annotation if it was already stored
+    let callout = answerDiv.__screenExplanation || null;
+    let callouts = answerDiv.__screenExplanations || null;
+
+    // No stored annotation — ask the AI to generate one now
+    if (!callout && !callouts) {
+      if (label) label.textContent = 'Thinking...';
+      const generated = await generateScreenAnnotationForMessage(answerDiv);
+      if (generated) {
+        if (Array.isArray(generated)) {
+          callouts = generated;
+          answerDiv.__screenExplanations = callouts;
+        } else {
+          callout = generated;
+          answerDiv.__screenExplanation = callout;
+        }
+      }
+    }
+
     if (label) label.textContent = 'Showing...';
+    const shown = await showScreenExplanationOnPage(callout, callouts);
 
-    const callout = getScreenExplanationForMessage(answerDiv);
-    const shown = await showScreenExplanationOnPage(callout);
-
-    if (label) label.textContent = shown ? 'Shown' : 'Can’t show here';
+    if (label) label.textContent = shown ? 'Shown' : "Can't show here";
     setTimeout(() => {
       if (label) label.textContent = originalLabel;
       screenBtn.disabled = false;
