@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <title>PRD - Web Dynamique & PHP</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f4f7f6;
+        }
+        .container {
+            background-color: #fff;
+            padding: 40px;
+            border-radius: 8px;
+            box-shadow: 0 2px 15px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #4F5D95; /* Couleur PHP */
+            border-bottom: 3px solid #4F5D95;
+            padding-bottom: 10px;
+            text-align: center;
+        }
+        h2 {
+            color: #2c3e50;
+            background: #ecf0f1;
+            padding: 10px;
+            border-left: 5px solid #4F5D95;
+            margin-top: 30px;
+        }
+        h3 {
+            color: #d35400;
+            border-bottom: 1px solid #eee;
+        }
+        .concept-box {
+            background-color: #f9f9f9;
+            border: 1px dashed #ccc;
+            padding: 15px;
+            margin: 10px 0;
+        }
+        code {
+            background-color: #272822;
+            color: #f8f8f2;
+            padding: 2px 5px;
+            border-radius: 4px;
+            font-family: 'Courier New', Courier, monospace;
+        }
+        pre {
+            background-color: #272822;
+            color: #f8f8f2;
+            padding: 15px;
+            border-radius: 5px;
+            overflow-x: auto;
+            border-left: 5px solid #66d9ef;
+        }
+        .explanation {
+            background-color: #e8f4fd;
+            border-left: 5px solid #3498db;
+            padding: 15px;
+            margin-top: -10px;
+            margin-bottom: 20px;
+            font-style: italic;
+        }
+        .keyword {
+            font-weight: bold;
+            color: #2980b9;
+        }
+        ul {
+            list-style-type: square;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>📖 PRD : Programmation Web Dynamique (PHP)</h1>
+
+    <h2>1. Concepts Clés & Architecture</h2>
+    <div class="concept-box">
+        <ul>
+            <li><span class="keyword">Web Dynamique</span> : Contrairement au statique, le serveur génère le code HTML à la volée pour chaque client.</li>
+            <li><span class="keyword">Architecture</span> : Le <span class="keyword">Front-End</span> s'exécute dans le navigateur (HTML/CSS/JS), tandis que le <span class="keyword">Back-End</span> s'exécute sur le serveur (PHP/Bases de données).</li>
+            <li><span class="keyword">API REST</span> : Pont de communication utilisant les méthodes HTTP (GET, POST, PUT, DELETE) pour échanger des données au format JSON.</li>
+        </ul>
+    </div>
+
+    <h2>2. Fondamentaux du PHP</h2>
+    <p>PHP est un langage de script <strong>interprété</strong> côté serveur[cite: 1]. Toute instruction se termine par un <strong>point-virgule (;)</strong>[cite: 1].</p>
+    
+    <h3>A. Intégration dans le HTML</h3>
+    <pre>
+&lt;?php
+echo "Je suis un étudiant.";
+?&gt;</pre>
+    <div class="explanation">
+        <strong>Explication :</strong> Le code est encadré par les balises <code>&lt;?php</code> et <code>?&gt;</code>[cite: 1]. L'instruction <code>echo</code> est utilisée pour envoyer du texte vers le navigateur afin qu'il soit affiché[cite: 1].
+    </div>
+
+    <h3>B. Guillemets Doubles vs Simples</h3>
+    <pre>
+&lt;?php 
+$nom = "Toto";
+echo "Hello $nom"; // Affiche : Hello Toto
+echo 'Hello $nom'; // Affiche : Hello $nom
+?&gt;</pre>
+    <div class="explanation">
+        <strong>Explication :</strong> Avec les <strong>guillemets doubles</strong>, PHP interprète les variables à l'intérieur[cite: 1]. Avec les <strong>guillemets simples</strong>, le texte est traité de manière brute et la variable n'est pas remplacée par sa valeur[cite: 1].
+    </div>
+
+    <h2>3. Variables, Constantes et Types</h2>
+    <ul>
+        <li><strong>Variables</strong> : Précédées du signe <code>$</code>. Le typage est faible (automatique)[cite: 1].</li>
+        <li><strong>Constantes</strong> : Définies avec <code>define("NOM", valeur)</code>. Elles n'ont pas de signe <code>$</code> et sont sensibles à la casse[cite: 1].</li>
+        <li><strong>Types de base</strong> : Entiers (int), Flottants (float), Booléens (bool), Chaînes (string), Tableaux (array) et Objets[cite: 1].</li>
+    </ul>
+
+    <h2>4. Structures de Contrôle</h2>
+    
+    <h3>La condition "Switch"</h3>
+    <pre>
+&lt;?php
+$operation = "+";
+$a = 5; $b = 3;
+switch ($operation) {
+    case "+":
+        echo $a + $b; break;
+    case "-":
+        echo $a - $b; break;
+    default:
+        echo "Opération inconnue.";
+}
+?&gt;</pre>
+    <div class="explanation">
+        <strong>Explication :</strong> Le <code>switch</code> compare une variable à plusieurs cas (<code>case</code>). Le mot-clé <code>break</code> est indispensable pour arrêter l'exécution une fois qu'un cas correspond, sinon PHP continue de lire les suivants[cite: 1].
+    </div>
+
+    <h2>5. Manipulation de Chaînes (Le Top 8)</h2>
+    <ul>
+        <li><code>strlen($ch)</code> : Longueur de la chaîne[cite: 1].</li>
+        <li><code>strtolower()</code> / <code>strtoupper()</code> : Changement de casse[cite: 1].</li>
+        <li><code>trim()</code> : Supprime les espaces inutiles[cite: 1].</li>
+        <li><code>strpos($ch, $recherche)</code> : Position d'un mot[cite: 1].</li>
+        <li><code>substr($ch, debut, taille)</code> : Extraction d'une partie[cite: 1].</li>
+        <li><code>str_replace(ancien, nouveau, $ch)</code> : Remplacement de texte[cite: 1].</li>
+        <li><code>explode(separateur, $ch)</code> : Coupe une chaîne en tableau[cite: 1].</li>
+        <li><code>implode(separateur, $tab)</code> : Joint un tableau en chaîne[cite: 1].</li>
+    </ul>
+
+    <h2>6. Comparaison Stricte</h2>
+    <pre>
+&lt;?php
+$a = 5;    // entier
+$b = "5";  // chaîne
+if ($a == $b)  { /* VRAI : même valeur */ }
+if ($a === $b) { /* FAUX : types différents */ }
+?&gt;</pre>
+    <div class="explanation">
+        <strong>Explication :</strong> L'opérateur <code>==</code> vérifie uniquement la valeur[cite: 1]. L'opérateur <code>===</code> (comparaison stricte) vérifie la valeur <strong>ET</strong> le type de donnée[cite: 1].
+    </div>
+
+</div>
+
+</body>
+</html>

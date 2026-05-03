@@ -1,7 +1,7 @@
 // ─── Configure marked.js for tight output (no excessive spacing) ───
 if (typeof marked !== 'undefined') {
   marked.setOptions({
-    breaks: false,
+    breaks: true,
     gfm: true
   });
   
@@ -10,7 +10,15 @@ if (typeof marked !== 'undefined') {
       const text = typeof token === 'object' ? token.text : arguments[0];
       const lang = typeof token === 'object' ? token.lang : arguments[1];
       
-      return `<div class="code-block-wrapper"><div class="code-block-header"><button class="copy-btn"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg> Copy</button></div><pre><code class="language-${lang || ''}">${text}</code></pre></div>`;
+      // Escape HTML entities to prevent rendering issues inside code blocks
+      const escapedText = text
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+      
+      return `<div class="code-block-wrapper"><div class="code-block-header"><span class="code-lang">${lang || ''}</span><button class="copy-btn"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg> Copy</button></div><pre><code class="language-${lang || ''}">${escapedText}</code></pre></div>`;
     }
   };
   marked.use({ renderer });
@@ -22,70 +30,73 @@ if (typeof marked !== 'undefined') {
 function preprocessLatexAndParse(text) {
   if (!text || typeof text !== 'string') return text;
 
-  // 1. Protect content that must NOT be touched (code blocks, inline code,
-  //    pre-existing math delimiters).
-  const saved = [];
-  const protect = (m) => {
-    saved.push(m);
-    return `\u0000${saved.length - 1}\u0000`;
+  // 1. Separate protection for content that must NOT be touched by math regexes
+  // but SHOULD be handled by marked (code blocks, inline code).
+  const codeBlocks = [];
+  const protectCode = (m) => {
+    codeBlocks.push(m);
+    return `\u0001${codeBlocks.length - 1}\u0001`;
   };
-  let s = text;
-  s = s.replace(/```[\s\S]*?```/g, protect);
-  s = s.replace(/`[^`\n]+`/g, protect);
-  s = s.replace(/\$\$[\s\S]+?\$\$/g, protect);
-  s = s.replace(/(^|[^\\])\$([^\$\n]+)\$/g, (m, lead, body) => lead + protect('$' + body + '$'));
-  s = s.replace(/\\\([\s\S]+?\\\)/g, protect);
-  s = s.replace(/\\\[[\s\S]+?\\\]/g, protect);
 
-  // 2a. Convert multi-line "[\n math \n]" blocks into display-math $$ ... $$.
+  // 2. Protection for math delimiters that must be preserved exactly
+  const mathSegments = [];
+  const protectMath = (m) => {
+    mathSegments.push(m);
+    return `\u0000${mathSegments.length - 1}\u0000`;
+  };
+
+  let s = text;
+  
+  // Protect code first
+  s = s.replace(/```[\s\S]*?```/g, protectCode);
+  s = s.replace(/`[^`\n]+`/g, protectCode);
+
+  // Protect existing math
+  s = s.replace(/\$\$[\s\S]+?\$\$/g, protectMath);
+  s = s.replace(/(^|[^\\])\$([^\$\n]+)\$/g, (m, lead, body) => lead + protectMath('$' + body + '$'));
+  s = s.replace(/\\\([\s\S]+?\\\)/g, protectMath);
+  s = s.replace(/\\\[[\s\S]+?\\\]/g, protectMath);
+
+  // 3. Math transformations (LaTeX auto-wrapping)
+  // Only convert multi-line "[\n math \n]" blocks into display-math $$ ... $$.
   s = s.replace(/(^|\n)[ \t]*\[[ \t]*\n([\s\S]+?)\n[ \t]*\][ \t]*(?=\n|$)/g, (m, lead, body) => {
     if (/\\[a-zA-Z]+|_\{|\^\{|[a-zA-Z]_[a-zA-Z0-9]/.test(body)) {
-      return `${lead}${protect('$$\n' + body.trim() + '\n$$')}`;
+      return `${lead}${protectMath('$$\n' + body.trim() + '\n$$')}`;
     }
     return m;
   });
 
-  // 2b. Convert inline "[ math ]" (LaTeX-style display brackets that appear
-  //    on the same line) into inline math.  Only triggers when the bracketed
-  //    content contains an unambiguous math indicator and no markdown link
-  //    target follows (no immediate "(" after the closing "]").
+  // Convert inline "[ math ]" into math if it looks like LaTeX
   s = s.replace(/\[\s*([^\[\]\n]*?(?:\\[a-zA-Z]+|_\{[^}\n]+\}|\^\{[^}\n]+\})[^\[\]\n]*?)\s*\](?!\()/g,
-    (m, body) => protect('$' + body.trim() + '$')
+    (m, body) => protectMath('$' + body.trim() + '$')
   );
 
-  // 3. Wrap LaTeX command tokens: \wedge, \vee, \neg, \dots, \sum{...}, etc.
+  // Wrap LaTeX command tokens: \wedge, \vee, etc.
   s = s.replace(/\\[a-zA-Z]+(?:\{[^}\n]*\})?/g, m => `$${m}$`);
 
-  // 4. Wrap subscript/superscript with braces: w_{ij}, x^{n}
+  // Wrap subscript/superscript with braces: w_{ij}, x^{n}
   s = s.replace(/[a-zA-Z]_\{[^}\n]+\}/g, m => `$${m}$`);
   s = s.replace(/[a-zA-Z]\^\{[^}\n]+\}/g, m => `$${m}$`);
 
-  // 5. Wrap simple sub/superscripts: d_j, x_2, x^2
-  s = s.replace(/\b([a-zA-Z])_([a-zA-Z0-9])\b/g, '$$$1_$2$$');
-  s = s.replace(/\b([a-zA-Z])\^([a-zA-Z0-9])\b/g, '$$$1^$2$$');
+  // Simple sub/superscripts: d_j, x^2 (avoiding common false positives)
+  s = s.replace(/\b([a-zA-Z])_([a-z0-9])\b/g, '$$$1_$2$$');
+  s = s.replace(/\b([a-zA-Z])\^([0-9])\b/g, '$$$1^$2$$');
 
-  // 6. Merge adjacent $...$ groups separated only by math-friendly chars
-  //    so e.g. "$d_j$ = $(w_{1j}$, $w_{2j}$, $\dots$, $w_{tj}$)" becomes
-  //    one continuous math expression.
-  let prev;
-  let guard = 0;
-  do {
-    prev = s;
-    s = s.replace(/\$([^\$\n]+)\$([ \t,=+\-*/.()\[\]]+)\$([^\$\n]+)\$/g, '$$$1$2$3$$');
-    guard++;
-  } while (s !== prev && guard < 20);
+  // 4. Restore CODE blocks before marked.parse so they are rendered as code
+  s = s.replace(/\u0001(\d+)\u0001/g, (_, i) => codeBlocks[+i]);
 
-  // Protect all newly formed $...$ and $$...$$ before passing to marked
-  s = s.replace(/\$\$[\s\S]+?\$\$/g, protect);
-  s = s.replace(/(^|[^\\])\$([^\$\n]+)\$/g, (m, lead, body) => lead + protect('$' + body + '$'));
+  // 5. Protect all newly formed $...$ and $$...$$ before passing to marked
+  s = s.replace(/\$\$[\s\S]+?\$\$/g, protectMath);
+  s = s.replace(/(^|[^\\])\$([^\$\n]+)\$/g, (m, lead, body) => lead + protectMath('$' + body + '$'));
 
+  // 6. Parse with marked
   let html = marked.parse(s);
 
-  // 7. Restore protected segments.
+  // 7. Restore MATH segments.
   let prevHtml;
   do {
     prevHtml = html;
-    html = html.replace(/\u0000(\d+)\u0000/g, (_, i) => saved[+i]);
+    html = html.replace(/\u0000(\d+)\u0000/g, (_, i) => mathSegments[+i]);
   } while (html !== prevHtml);
 
   return html;
@@ -3524,7 +3535,10 @@ async function handleAgentSend(userGoal) {
       } catch (err) {
         if (err.name === 'AbortError' || err.message.includes('aborted')) break;
         await fadeOutAndRemove(thinkingEl, 400);
-        appendAIMessage(`Agent error at step ${stepCount}: ${err.message}`, { className: 'message ai' });
+        const errorMsg = `Agent stopped due to an error during AI call: ${err.message}`;
+        appendAIMessage(errorMsg, { className: 'message ai' });
+        conversationHistory.push({ role: 'assistant', content: `[Agent stopped - error] ${errorMsg}` });
+        chrome.storage.local.set({ conversationHistory });
         agentRunning = false;
         break;
       }
@@ -3636,6 +3650,15 @@ async function handleAgentSend(userGoal) {
       appendAIMessage(maxMsg, { className: 'message ai' });
       conversationHistory.push({ role: 'assistant', content: `[Agent stopped - max steps] Goal: ${refinedGoal}\nStopped after ${stepCount} steps.` });
       chrome.storage.local.set({ conversationHistory });
+    }
+  } catch (err) {
+    // Catch-all for any unexpected errors in the agent loop (e.g. script injection failures, tab closing)
+    if (err.name !== 'AbortError' && !err.message.includes('aborted')) {
+      const unexpectedError = `Agent encountered an unexpected problem and had to stop: ${err.message}`;
+      appendAIMessage(unexpectedError, { className: 'message ai' });
+      conversationHistory.push({ role: 'assistant', content: `[Agent stopped - unexpected error] ${unexpectedError}` });
+      chrome.storage.local.set({ conversationHistory });
+      console.error('Agent loop crashed:', err);
     }
   } finally {
     activeAgentThinkingEl = null;

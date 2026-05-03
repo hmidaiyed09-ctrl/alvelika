@@ -672,6 +672,7 @@ body::before {
 .stream-text em {
   color: var(--text-secondary);
   font-style: italic;
+  font-size: 0.96em;
 }
 
 /* -- Math and semantic output -- */
@@ -764,10 +765,20 @@ body::before {
 
 .code-block-header {
   display: flex;
-  justify-content: flex-end;
-  padding: 6px 12px;
-  background-color: rgba(124, 92, 252, 0.06);
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 14px;
+  background-color: rgba(124, 92, 252, 0.04);
   border-bottom: 1px solid var(--border-subtle);
+}
+
+.code-lang {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-family: 'Inter', sans-serif;
 }
 
 .copy-btn {
@@ -791,12 +802,12 @@ body::before {
 
 .code-block-wrapper pre {
   margin: 0;
-  padding: 16px;
+  padding: 16px 18px;
   overflow-x: auto;
-  color: #e2e2e2;
-  font-family: 'JetBrains Mono', 'Fira Code', monospace;
-  font-size: 13px;
-  line-height: 1.6;
+  color: #d1d1e0;
+  font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 13.5px;
+  line-height: 1.65;
   background: transparent;
   border: none;
   border-radius: 0;
