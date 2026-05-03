@@ -754,13 +754,13 @@ body::before {
 
 /* ── Code blocks ── */
 .code-block-wrapper {
-  background-color: #111118;
+  background-color: #282c34; /* Matches Atom One Dark theme */
   border-radius: var(--radius-sm);
-  border: 1px solid var(--border-light);
+  border: 1px solid rgba(255, 255, 255, 0.08);
   margin: 18px 0;
   overflow: hidden;
   white-space: normal;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
 }
 
 .code-block-header {
@@ -768,8 +768,8 @@ body::before {
   justify-content: space-between;
   align-items: center;
   padding: 8px 14px;
-  background-color: rgba(124, 92, 252, 0.04);
-  border-bottom: 1px solid var(--border-subtle);
+  background-color: rgba(0, 0, 0, 0.15);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
 }
 
 .code-lang {
@@ -804,13 +804,31 @@ body::before {
   margin: 0;
   padding: 16px 18px;
   overflow-x: auto;
-  color: #d1d1e0;
+  color: #abb2bf;
   font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
-  font-size: 13.5px;
-  line-height: 1.65;
+  font-size: 13px;
+  line-height: 1.6;
   background: transparent;
   border: none;
   border-radius: 0;
+}
+
+/* Terminal-specific styling */
+.code-block-wrapper:has(.language-bash),
+.code-block-wrapper:has(.language-sh),
+.code-block-wrapper:has(.language-shell),
+.code-block-wrapper:has(.language-zsh) {
+  border-left: 3px solid #61aeee; /* Terminal blue accent */
+}
+
+.code-block-wrapper:has(.language-bash) .code-block-header::before,
+.code-block-wrapper:has(.language-sh) .code-block-header::before {
+  content: '🐚 Terminal';
+  font-size: 10px;
+  font-weight: 700;
+  color: #61aeee;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
 }
 
 .code-block-wrapper pre::-webkit-scrollbar {

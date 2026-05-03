@@ -10,15 +10,26 @@ if (typeof marked !== 'undefined') {
       const text = typeof token === 'object' ? token.text : arguments[0];
       const lang = typeof token === 'object' ? token.lang : arguments[1];
       
-      // Escape HTML entities to prevent rendering issues inside code blocks
-      const escapedText = text
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#039;');
+      let highlightedCode;
+      if (typeof hljs !== 'undefined') {
+        if (lang && hljs.getLanguage(lang)) {
+          try {
+            highlightedCode = hljs.highlight(text, { language: lang }).value;
+          } catch (err) {
+            highlightedCode = text;
+          }
+        } else {
+          try {
+            highlightedCode = hljs.highlightAuto(text).value;
+          } catch (err) {
+            highlightedCode = text;
+          }
+        }
+      } else {
+        highlightedCode = text;
+      }
       
-      return `<div class="code-block-wrapper"><div class="code-block-header"><span class="code-lang">${lang || ''}</span><button class="copy-btn"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg> Copy</button></div><pre><code class="language-${lang || ''}">${escapedText}</code></pre></div>`;
+      return `<div class="code-block-wrapper"><div class="code-block-header"><span class="code-lang">${lang || ''}</span><button class="copy-btn"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg> Copy</button></div><pre><code class="hljs language-${lang || ''}">${highlightedCode}</code></pre></div>`;
     }
   };
   marked.use({ renderer });
