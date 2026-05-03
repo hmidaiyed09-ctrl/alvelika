@@ -258,8 +258,38 @@ function annotateRenderedOutput(el) {
 
 function extractScreenExplanation(text) {
   const source = text || '';
+
+  // ── 1. Try multi-callout: <screen_explanations>[...]</screen_explanations> ──
+  const multiMatch = source.match(/<screen_explanations\b[^>]*>([\s\S]*?)<\/screen_explanations>/i);
+  if (multiMatch) {
+    let jsonText = multiMatch[1].trim()
+      .replace(/^```(?:json)?/i, '')
+      .replace(/```$/i, '')
+      .trim();
+    try {
+      const arr = JSON.parse(jsonText);
+      if (Array.isArray(arr) && arr.length > 0) {
+        const callouts = arr.map(item => ({
+          target: String(item.target || '').trim(),
+          title: String(item.title || 'Note').trim().substring(0, 90),
+          body: String(item.body || '').trim().substring(0, 420),
+          kind: ['concept', 'action', 'result', 'caution'].includes(
+            String(item.kind || '').toLowerCase()
+          ) ? String(item.kind).toLowerCase() : 'default'
+        }));
+        const cleanText = source
+          .replace(/<screen_explanations\b[^>]*>[\s\S]*?<\/screen_explanations>/gi, '')
+          .trim();
+        return { text: cleanText, callout: null, callouts };
+      }
+    } catch (err) {
+      console.warn('Could not parse screen_explanations array:', err);
+    }
+  }
+
+  // ── 2. Fall back to single <screen_explanation>{...}</screen_explanation> ──
   const match = source.match(/<screen_explanation\b[^>]*>([\s\S]*?)<\/screen_explanation>/i);
-  if (!match) return { text: source, callout: null };
+  if (!match) return { text: source, callout: null, callouts: null };
 
   const cleanText = source.replace(/<screen_explanation\b[^>]*>[\s\S]*?<\/screen_explanation>/gi, '').trim();
   let jsonText = match[1].trim();
@@ -272,7 +302,7 @@ function extractScreenExplanation(text) {
     const target = String(parsed.target || parsed.selector || parsed.label || '').trim();
     const kind = String(parsed.kind || parsed.type || 'default').trim().toLowerCase();
 
-    if (!title && !body) return { text: cleanText, callout: null };
+    if (!title && !body) return { text: cleanText, callout: null, callouts: null };
 
     return {
       text: cleanText,
@@ -281,16 +311,19 @@ function extractScreenExplanation(text) {
         title: title.substring(0, 90),
         body: body.substring(0, 420),
         kind: ['concept', 'action', 'result', 'caution'].includes(kind) ? kind : 'default'
-      }
+      },
+      callouts: null
     };
   } catch (err) {
     console.warn('Could not parse screen explanation:', err);
-    return { text: cleanText, callout: null };
+    return { text: cleanText, callout: null, callouts: null };
   }
 }
 
-async function showScreenExplanationOnPage(callout) {
-  if (!callout) return false;
+async function showScreenExplanationOnPage(callout, callouts) {
+  // Determine if we have a tour (array) or single callout
+  const isTour = Array.isArray(callouts) && callouts.length > 0;
+  if (!isTour && !callout) return false;
 
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -298,10 +331,9 @@ async function showScreenExplanationOnPage(callout) {
       return false;
     }
 
-    const message = {
-      action: 'showScreenExplanation',
-      payload: callout
-    };
+    const message = isTour
+      ? { action: 'showScreenExplanations', payload: callouts }
+      : { action: 'showScreenExplanation', payload: callout };
 
     try {
       await chrome.tabs.sendMessage(tab.id, message);
@@ -463,18 +495,18 @@ function buildFallbackScreenExplanation(answerDiv) {
   const answerText = getCleanAnswerText(answerDiv);
   const inferred = inferTargetCandidateFromAnswer(answerText);
   const target = inferred.target;
-  const summary = answerText
-    .replace(/\s+/g, ' ')
-    .split(/(?<=[.!?])\s+/)[0]
-    ?.substring(0, 220)
+
+  // Use ONLY the first sentence as the body — not the full response
+  const firstSentence = (answerText.replace(/\s+/g, ' ').match(/[^.!?]+[.!?]/) || [''])[0].trim();
+  const body = firstSentence.substring(0, 180)
     || 'This note is connected to what Alvelika explained in chat.';
 
   return {
     target,
     title: target ? `Look for ${target}` : 'Screen explanation',
     body: target
-      ? `Alvelika was referring to this part of the page. ${summary}`
-      : summary,
+      ? body
+      : body,
     kind: inferScreenKindFromAnswer(answerText),
     confidence: inferred.confidence
   };
@@ -1139,6 +1171,7 @@ async function regenerateLastAssistantMessage(answerDiv) {
     const parsedResult = extractScreenExplanation(rawResult);
     const responseText = parsedResult.text || rawResult;
     const screenExplanation = parsedResult.callout;
+    const screenExplanations = parsedResult.callouts;
 
     if (isDeepThink) {
       let thinkingText = '';
@@ -1180,7 +1213,8 @@ async function regenerateLastAssistantMessage(answerDiv) {
       chrome.storage.local.set({ conversationHistory });
       await streamText(finalAnswer || responseText, newDiv, currentAbortController.signal);
       addMessageActions(newDiv);
-      if (screenExplanation) showScreenExplanationOnPage(screenExplanation);
+      if (screenExplanations?.length) showScreenExplanationOnPage(null, screenExplanations);
+      else if (screenExplanation) showScreenExplanationOnPage(screenExplanation);
     } else {
       await fadeOutAndRemove(thinkingEl, 400);
       const newDiv = document.createElement('div');
@@ -1191,7 +1225,8 @@ async function regenerateLastAssistantMessage(answerDiv) {
       chrome.storage.local.set({ conversationHistory });
       await streamText(responseText, newDiv, currentAbortController.signal);
       addMessageActions(newDiv);
-      if (screenExplanation) showScreenExplanationOnPage(screenExplanation);
+      if (screenExplanations?.length) showScreenExplanationOnPage(null, screenExplanations);
+      else if (screenExplanation) showScreenExplanationOnPage(screenExplanation);
     }
   } catch (err) {
     if (err.name === 'AbortError' || (err.message && err.message.includes('aborted'))) {
@@ -1374,9 +1409,21 @@ CRITICAL INSTRUCTIONS:
 4. BE KIND, ENCOURAGING & ELEGANT: Use a supportive, teacher-like tone. Use Markdown (###, **, -) to make the answer beautiful and easy to read. YOU MUST NOT USE ANY EMOJIS (NO SMILEYS, NO ICONS) UNDER ANY CIRCUMSTANCES.
 5. If the conversation history contains agent results, you are aware of what happened and can reference those results naturally.
 6. FORMATTING DISCIPLINE: Do not use raw HTML colors. Use bold sparingly for meaningful terms. Put important equations in display math with $$...$$, especially formulas that define a result or method.
-7. OPTIONAL SCREEN EXPLANATION: If the user asks what/where/which visible page element matters, or your answer would clearly benefit from pointing at something on the current webpage, append exactly one hidden block after your answer:
-<screen_explanation>{"target":"visible text, aria label, or short natural-language name of the page element","title":"short title","body":"one or two helpful sentences","kind":"concept|action|result|caution"}</screen_explanation>
-The target MUST be the exact visible label or aria-label of the control when possible, such as "New chat" or "Customize". Never use vague targets like "left sidebar", "right button", "top menu", or "the menu". Use this only for elements on the active webpage, not Alvelika's side panel. If no visual page callout is useful, omit the block.`;
+7. OPTIONAL SCREEN ANNOTATIONS: If the user asks where something is on the page, or asks you to explain/walk through the page interface, annotate elements visually using one of the two formats below. Use ONLY for elements on the active webpage — never for Alvelika's own side panel.
+
+FOR A SINGLE ELEMENT — append exactly one block after your answer:
+<screen_explanation>{"target":"exact visible text or aria-label of the element (e.g. \"New chat\")","title":"short title (≤ 8 words)","body":"One precise sentence describing ONLY this element — not a summary of your full answer.","kind":"concept|action|result|caution"}</screen_explanation>
+
+FOR MULTIPLE ELEMENTS (e.g. \"explain this page\", \"walk me through this interface\", \"what does each button do\") — append exactly one block after your answer:
+<screen_explanations>[
+  {"target":"exact visible label 1","title":"short title","body":"One sentence about element 1 only.","kind":"action"},
+  {"target":"exact visible label 2","title":"short title","body":"One sentence about element 2 only.","kind":"concept"}
+]</screen_explanations>
+
+RULES FOR BOTH FORMATS:
+- "target" MUST be the exact visible text, button label, or aria-label (e.g. \"New chat\", \"Search\", \"Submit\"). NEVER use vague targets like \"left sidebar\", \"top menu\", \"the button\".
+- "body" must describe ONLY that specific element in 1–2 sentences. Do NOT paste your full answer into it.
+- If no visual annotation adds value, omit the block entirely.`;
 
   // Push user message into conversation history
   conversationHistory.push({ role: 'user', content: userContent });
@@ -1399,6 +1446,7 @@ The target MUST be the exact visible label or aria-label of the control when pos
     const parsedResult = extractScreenExplanation(rawResult);
     const responseText = parsedResult.text || rawResult;
     const screenExplanation = parsedResult.callout;
+    const screenExplanations = parsedResult.callouts;
 
     if (isDeepThink) {
       let thinkingText = '';
@@ -1456,7 +1504,8 @@ The target MUST be the exact visible label or aria-label of the control when pos
       chrome.storage.local.set({ conversationHistory });
       await streamText(finalAnswer, answerDiv, currentAbortController.signal);
       addMessageActions(answerDiv);
-      if (screenExplanation) showScreenExplanationOnPage(screenExplanation);
+      if (screenExplanations?.length) showScreenExplanationOnPage(null, screenExplanations);
+      else if (screenExplanation) showScreenExplanationOnPage(screenExplanation);
 
     } else {
       await fadeOutAndRemove(thinkingEl, 400);
@@ -1469,7 +1518,8 @@ The target MUST be the exact visible label or aria-label of the control when pos
       chrome.storage.local.set({ conversationHistory });
       await streamText(responseText, answerDiv, currentAbortController.signal);
       addMessageActions(answerDiv);
-      if (screenExplanation) showScreenExplanationOnPage(screenExplanation);
+      if (screenExplanations?.length) showScreenExplanationOnPage(null, screenExplanations);
+      else if (screenExplanation) showScreenExplanationOnPage(screenExplanation);
     }
 
   } catch (err) {

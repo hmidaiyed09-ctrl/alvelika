@@ -420,8 +420,16 @@ const screenExplanationOverlay = (() => {
   let kickerEl = null;
   let titleEl = null;
   let bodyEl = null;
+  let navEl = null;
+  let navPrevEl = null;
+  let navNextEl = null;
+  let navStepEl = null;
   let targetEl = null;
   let activePayload = null;
+
+  // ── Tour queue state ──
+  let tourQueue = [];   // array of callout objects
+  let tourIndex = 0;   // current step (0-based)
 
   const colors = {
     concept: '#38bdf8',
@@ -559,6 +567,48 @@ const screenExplanationOverlay = (() => {
           font-size: 13px;
           line-height: 1.55;
         }
+        /* ── Tour navigation bar ── */
+        .nav {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          margin-top: 12px;
+          padding-top: 10px;
+          border-top: 1px solid rgba(255, 255, 255, 0.06);
+        }
+        .nav.hidden { display: none; }
+        .nav-btn {
+          flex: 1;
+          padding: 6px 10px;
+          border-radius: 8px;
+          border: 1px solid rgba(255, 255, 255, 0.1);
+          background: rgba(255, 255, 255, 0.05);
+          color: rgba(245, 245, 251, 0.8);
+          font-size: 12px;
+          font-weight: 600;
+          cursor: pointer;
+          transition: background 140ms ease, color 140ms ease;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          gap: 4px;
+        }
+        .nav-btn:hover {
+          background: rgba(255, 255, 255, 0.1);
+          color: #ffffff;
+        }
+        .nav-btn:disabled {
+          opacity: 0.28;
+          cursor: default;
+        }
+        .nav-step {
+          flex: 0 0 auto;
+          text-align: center;
+          font-size: 11px;
+          color: rgba(245, 245, 251, 0.45);
+          min-width: 36px;
+          font-variant-numeric: tabular-nums;
+        }
         @media (max-width: 520px) {
           .card {
             width: calc(100vw - 24px);
@@ -584,6 +634,17 @@ const screenExplanationOverlay = (() => {
           </div>
           <div class="title"></div>
           <div class="body"></div>
+          <div class="nav hidden">
+            <button class="nav-btn nav-prev" aria-label="Previous">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+              Prev
+            </button>
+            <span class="nav-step"></span>
+            <button class="nav-btn nav-next" aria-label="Next">
+              Next
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+            </button>
+          </div>
         </div>
       </div>
     `;
@@ -595,7 +656,13 @@ const screenExplanationOverlay = (() => {
     kickerEl = shadow.querySelector('.kicker');
     titleEl = shadow.querySelector('.title');
     bodyEl = shadow.querySelector('.body');
+    navEl = shadow.querySelector('.nav');
+    navPrevEl = shadow.querySelector('.nav-prev');
+    navNextEl = shadow.querySelector('.nav-next');
+    navStepEl = shadow.querySelector('.nav-step');
     shadow.querySelector('.close')?.addEventListener('click', hide);
+    navPrevEl?.addEventListener('click', () => navigateTour(-1));
+    navNextEl?.addEventListener('click', () => navigateTour(+1));
 
     document.documentElement.appendChild(host);
   }
@@ -855,11 +922,61 @@ const screenExplanationOverlay = (() => {
     titleEl.textContent = activePayload.title;
     bodyEl.textContent = activePayload.body;
 
+    // Hide tour nav for single-callout mode
+    if (navEl) navEl.classList.add('hidden');
+
     root.classList.add('visible');
     requestAnimationFrame(positionOverlay);
   }
 
+  // ── Tour: show a specific step from the queue ──
+  function showTourStep(index) {
+    if (!tourQueue.length) return;
+    tourIndex = Math.max(0, Math.min(index, tourQueue.length - 1));
+    const payload = tourQueue[tourIndex];
+
+    ensureOverlay();
+    activePayload = {
+      target: payload.target || '',
+      title: String(payload.title || 'Look here').substring(0, 90),
+      body: String(payload.body || '').substring(0, 420),
+      kind: String(payload.kind || 'default').toLowerCase()
+    };
+    targetEl = findTargetElement(activePayload.target);
+
+    setColor(activePayload.kind);
+    kickerEl.textContent = activePayload.kind === 'default'
+      ? 'Alvelika explains'
+      : `Alvelika ${activePayload.kind}`;
+    titleEl.textContent = activePayload.title;
+    bodyEl.textContent = activePayload.body;
+
+    // Show and update tour nav
+    if (navEl) navEl.classList.remove('hidden');
+    if (navStepEl) navStepEl.textContent = `${tourIndex + 1} / ${tourQueue.length}`;
+    if (navPrevEl) navPrevEl.disabled = tourIndex === 0;
+    if (navNextEl) navNextEl.disabled = tourIndex === tourQueue.length - 1;
+
+    root.classList.add('visible');
+    requestAnimationFrame(positionOverlay);
+  }
+
+  // ── Tour: navigate by offset (-1 or +1) ──
+  function navigateTour(offset) {
+    showTourStep(tourIndex + offset);
+  }
+
+  // ── Tour: start a queue of callouts ──
+  function showQueue(callouts) {
+    if (!Array.isArray(callouts) || callouts.length === 0) return;
+    tourQueue = callouts;
+    tourIndex = 0;
+    showTourStep(0);
+  }
+
   function hide() {
+    tourQueue = [];
+    tourIndex = 0;
     activePayload = null;
     targetEl = null;
     if (root) root.classList.remove('visible');
@@ -868,7 +985,7 @@ const screenExplanationOverlay = (() => {
   window.addEventListener('scroll', positionOverlay, true);
   window.addEventListener('resize', positionOverlay);
 
-  return { show, hide };
+  return { show, hide, showQueue };
 })();
 
 // Ctrl+C to stop the agent when overlay is active
@@ -913,6 +1030,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
   if (request.action === 'showScreenExplanation') {
     screenExplanationOverlay.show(request.payload || {});
+    sendResponse({ ok: true });
+  }
+
+  // Multi-callout guided tour
+  if (request.action === 'showScreenExplanations') {
+    screenExplanationOverlay.showQueue(request.payload || []);
     sendResponse({ ok: true });
   }
 
