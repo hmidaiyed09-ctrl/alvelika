@@ -586,6 +586,7 @@ const chatContainer = document.getElementById('chat-container');
 const chatInput = document.getElementById('chat-input');
 const sendButton = document.getElementById('send-button');
 const clearButton = document.getElementById('clear-button');
+const deleteChatButton = document.getElementById('delete-chat-button');
 const settingsButton = document.getElementById('settings-button');
 const uploadButton = document.getElementById('upload-button');
 const imageUpload = document.getElementById('image-upload');
@@ -609,6 +610,85 @@ let agentModeActive = false;
 let deepThinkActive = false;
 let lastSystemPrompt = null;       // Remembered for regenerate
 let lastIsDeepThink = false;       // Remembered for regenerate
+let latestPageWalkthroughHints = [];
+let latestIsFullPageWalkthrough = false;
+
+function isFullPageWalkthroughRequest(text = '') {
+  const prompt = String(text).toLowerCase();
+  return /\b(explain|explaine|walk|break\s*down|describe|what\s+is|what'?s)\b[\s\S]{0,80}\b(everything|all|whole|entire|full|each|every)\b[\s\S]{0,80}\b(page|screen|interface|dashboard|site|view)\b/.test(prompt)
+    || /\b(everything|all|whole|entire|full)\b[\s\S]{0,50}\b(page|screen|interface|dashboard|site|view)\b/.test(prompt)
+    || /\b(walk\s*me\s*through|explain\s+this\s+page|explain\s+the\s+page|describe\s+this\s+screen|what\s+am\s+i\s+looking\s+at)\b/.test(prompt);
+}
+
+function normalizeWalkthroughKey(text = '') {
+  return String(text).toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+function formatPageSnapshot(result, wantsFullPageWalkthrough) {
+  const title = result?.title || 'Untitled page';
+  const url = result?.url ? `\nURL: ${result.url}` : '';
+  const outline = Array.isArray(result?.outline) && result.outline.length
+    ? '\n\nVISIBLE PAGE OUTLINE:\n' + result.outline.map((item, index) => {
+        const role = item.role ? `${item.role}: ` : '';
+        const bounds = item.bounds ? ` (${item.bounds})` : '';
+        return `${index + 1}. ${role}${item.label}${bounds}`;
+      }).join('\n')
+    : '';
+  const note = wantsFullPageWalkthrough
+    ? '\n\nFULL-PAGE REQUEST DETECTED: The user is asking for the whole visible page/screen. Use the VISIBLE PAGE OUTLINE as a checklist. Cover all meaningful visible regions, controls, tabs, rows, headings, and major items instead of only the first few.'
+    : '';
+  return `[Context of active page: ${title}]${url}${note}${outline}\n\nPAGE TEXT:\n${result?.text || ''}`;
+}
+
+function pageRoleLabel(role = '') {
+  const key = String(role).toLowerCase();
+  if (key.includes('button')) return 'button';
+  if (key.includes('link')) return 'link';
+  if (key.includes('tab')) return 'tab';
+  if (key.includes('input') || key.includes('textbox') || key.includes('searchbox')) return 'field';
+  if (key.includes('heading')) return 'heading';
+  if (key.includes('row')) return 'row';
+  if (key.includes('list')) return 'list item';
+  return key || 'page item';
+}
+
+function buildWalkthroughCallout(seed) {
+  const role = pageRoleLabel(seed.role);
+  const label = String(seed.label || '').trim();
+  if (!label) return null;
+
+  const actionRoles = new Set(['button', 'link', 'tab', 'field']);
+  const kind = actionRoles.has(role) ? 'action' : 'concept';
+  const title = label.length > 64 ? label.substring(0, 61).trim() + '...' : label;
+  const body = kind === 'action'
+    ? `This ${role} is one of the visible controls on the page and helps you move or change the current view.`
+    : `This ${role} is one of the visible parts of the page that gives structure or content to the current view.`;
+
+  return { target: label, title, body, kind };
+}
+
+function completeFullPageTour(callouts) {
+  if (!latestIsFullPageWalkthrough || !Array.isArray(latestPageWalkthroughHints) || latestPageWalkthroughHints.length === 0) {
+    return callouts;
+  }
+
+  const merged = Array.isArray(callouts) ? [...callouts] : [];
+  const seen = new Set(merged.map(item => normalizeWalkthroughKey(item?.target || item?.title || '')).filter(Boolean));
+  const minimumTourSize = Math.min(10, latestPageWalkthroughHints.length);
+  const targetTourSize = Math.min(18, Math.max(minimumTourSize, merged.length));
+
+  for (const seed of latestPageWalkthroughHints) {
+    if (merged.length >= targetTourSize) break;
+    const key = normalizeWalkthroughKey(seed.label);
+    if (!key || seen.has(key)) continue;
+    const callout = buildWalkthroughCallout(seed);
+    if (!callout) continue;
+    merged.push(callout);
+    seen.add(key);
+  }
+
+  return merged.length > 0 ? merged : callouts;
+}
 // ─── Initialize Chat State ───
 document.addEventListener('DOMContentLoaded', async () => {
   const data = await chrome.storage.local.get(['activeChatId', 'allChats', 'conversationHistory']);
@@ -735,19 +815,35 @@ async function deleteChat(chatId, e) {
   delete allChats[chatId];
   
   if (activeChatId === chatId) {
-    activeChatId = Object.keys(allChats)[0] || null;
-    if (activeChatId) {
-      loadChat(activeChatId);
-    } else {
-      conversationHistory = [];
-      renderWelcome();
-      renderHistoryList();
-    }
+    const id = 'chat_' + Date.now();
+    allChats[id] = {
+      id,
+      name: 'New Chat',
+      timestamp: Date.now(),
+      messages: []
+    };
+    activeChatId = id;
+    conversationHistory = [];
+    loadChat(id);
   } else {
     renderHistoryList();
   }
   
-  await chrome.storage.local.set({ allChats, activeChatId });
+  await chrome.storage.local.set({ allChats, activeChatId, conversationHistory });
+}
+
+async function deleteCurrentChat(e) {
+  if (!activeChatId || !allChats[activeChatId]) return;
+
+  const currentChat = allChats[activeChatId];
+  const hasMessages = (currentChat.messages && currentChat.messages.length > 0) || conversationHistory.length > 0;
+  const chatName = currentChat.name && currentChat.name !== 'New Chat' ? `"${currentChat.name}"` : 'this chat';
+
+  if (hasMessages && !window.confirm(`Delete ${chatName}? This cannot be undone.`)) {
+    return;
+  }
+
+  await deleteChat(activeChatId, e);
 }
 
 function renderHistoryList() {
@@ -894,6 +990,8 @@ settingsButton.addEventListener('click', () => {
 clearButton.addEventListener('click', () => {
   createNewChat();
 });
+
+deleteChatButton.addEventListener('click', deleteCurrentChat);
 
 // Image Upload Logic
 uploadButton.addEventListener('click', () => {
@@ -1053,6 +1151,9 @@ async function handleSend() {
 
   // Extract page context (ON-DEMAND SCRAPER)
   let pageContext = 'No context available.';
+  const wantsFullPageWalkthrough = isFullPageWalkthroughRequest(text);
+  latestIsFullPageWalkthrough = wantsFullPageWalkthrough;
+  latestPageWalkthroughHints = [];
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (tab && tab.id && tab.url && (tab.url.startsWith('chrome://') || tab.url.startsWith('edge://') || tab.url.startsWith('about:'))) {
@@ -1062,11 +1163,87 @@ async function handleSend() {
       const injectionResults = await chrome.scripting.executeScript({
         target: { tabId: tab.id },
         func: () => {
+          const MAX_PAGE_TEXT = 50000;
+          const MAX_OUTLINE_ITEMS = 120;
           let text = '';
           const article = document.querySelector('article');
           const main = document.querySelector('main') || document.querySelector('[role="main"]');
           const root = article || main || document.body;
           text = root.innerText;
+
+          function isVisible(el) {
+            if (!el || !el.getBoundingClientRect) return false;
+            const rect = el.getBoundingClientRect();
+            if (rect.width < 2 || rect.height < 2) return false;
+            const style = window.getComputedStyle(el);
+            if (style.visibility === 'hidden' || style.display === 'none' || Number(style.opacity) === 0) return false;
+            if (rect.bottom < 0 || rect.right < 0 || rect.top > window.innerHeight || rect.left > window.innerWidth) return false;
+            return true;
+          }
+
+          function cleanLabel(value, max = 140) {
+            return String(value || '').replace(/\s+/g, ' ').trim().substring(0, max);
+          }
+
+          function elementRole(el) {
+            const explicit = el.getAttribute('role');
+            if (explicit) return explicit;
+            const tag = el.tagName.toLowerCase();
+            if (/^h[1-6]$/.test(tag)) return 'heading';
+            if (tag === 'button') return 'button';
+            if (tag === 'a') return 'link';
+            if (tag === 'input' || tag === 'textarea') return (el.type || '').toLowerCase() === 'search' ? 'searchbox' : 'textbox';
+            if (tag === 'select') return 'combobox';
+            if (tag === 'li') return 'listitem';
+            if (tag === 'tr') return 'row';
+            return tag;
+          }
+
+          function elementLabel(el) {
+            const aria = cleanLabel(el.getAttribute('aria-label'));
+            if (aria) return aria;
+            const labelledBy = el.getAttribute('aria-labelledby');
+            if (labelledBy) {
+              const label = labelledBy.split(/\s+/).map(id => document.getElementById(id)?.textContent || '').join(' ');
+              const cleaned = cleanLabel(label);
+              if (cleaned) return cleaned;
+            }
+            const placeholder = cleanLabel(el.getAttribute('placeholder'));
+            if (placeholder) return placeholder;
+            const title = cleanLabel(el.getAttribute('title'));
+            if (title) return title;
+            const value = cleanLabel(el.value);
+            if (value && ['input', 'textarea', 'select'].includes(el.tagName.toLowerCase())) return value;
+            return cleanLabel(el.innerText || el.textContent);
+          }
+
+          const outlineSelector = [
+            'h1', 'h2', 'h3', 'h4',
+            'button', 'a[href]', 'input', 'textarea', 'select', 'summary',
+            '[role="button"]', '[role="link"]', '[role="tab"]', '[role="menuitem"]',
+            '[role="option"]', '[role="switch"]', '[role="checkbox"]', '[role="radio"]',
+            '[aria-label]', '[placeholder]', '[title]',
+            'li', '[role="row"]', 'tr', '[class*="task"]', '[data-testid*="task"]'
+          ].join(',');
+
+          const outline = [];
+          const seenOutline = new Set();
+          Array.from(document.querySelectorAll(outlineSelector)).forEach((el) => {
+            if (outline.length >= MAX_OUTLINE_ITEMS || !isVisible(el)) return;
+            const label = elementLabel(el);
+            if (!label || label.length < 2) return;
+            if (label.length > 220) return;
+            const key = label.toLowerCase();
+            if (seenOutline.has(key)) return;
+            seenOutline.add(key);
+            const rect = el.getBoundingClientRect();
+            outline.push({
+              role: elementRole(el),
+              label,
+              bounds: `x=${Math.round(rect.left)}, y=${Math.round(rect.top)}, w=${Math.round(rect.width)}, h=${Math.round(rect.height)}`
+            });
+          });
+
           const sections = [];
           const headings = root.querySelectorAll('h1, h2, h3, h4, h5, h6');
           headings.forEach((h, i) => {
@@ -1110,14 +1287,18 @@ async function handleSend() {
           }
           return {
             title: document.title,
-            text: text.substring(0, 15000),
-            sections: sections.slice(0, 30)
+            url: window.location.href,
+            text: text.substring(0, MAX_PAGE_TEXT),
+            sections: sections.slice(0, 30),
+            outline,
+            calloutSeeds: outline.slice(0, 40)
           };
         }
       });
       if (injectionResults && injectionResults[0] && injectionResults[0].result) {
         const result = injectionResults[0].result;
-        pageContext = `[Context of active page: ${result.title}]\n\n${result.text}`;
+        latestPageWalkthroughHints = Array.isArray(result.calloutSeeds) ? result.calloutSeeds : [];
+        pageContext = formatPageSnapshot(result, wantsFullPageWalkthrough);
       }
     }
   } catch (err) {
@@ -1234,6 +1415,45 @@ function updateThinkingState(el, text) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function formatAgentDoneMessage(refinedGoal, value) {
+  const raw = String(value || '').trim();
+  if (!raw) return `Goal achieved: ${refinedGoal}`;
+
+  if (/^IMPOSSIBLE:/i.test(raw)) {
+    const reason = raw.replace(/^IMPOSSIBLE:\s*/i, '').trim();
+    return `Could not complete the goal: ${reason || refinedGoal}`;
+  }
+
+  let text = raw
+    .replace(/^\s*✅\s*/u, '')
+    .replace(/^Goal achieved(?:\s+in\s+[^:\n]+)?\s*:\s*/i, '')
+    .trim();
+
+  if (/^Goal achieved:/i.test(raw) && raw.length <= 700) {
+    return raw.replace(/^\s*✅\s*/u, '').trim();
+  }
+
+  const paragraphs = text
+    .split(/\n{2,}/)
+    .map((part) => part.replace(/\n+/g, ' ').replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+
+  const achievement = (paragraphs[0] || text || refinedGoal)
+    .replace(/^[-*]\s*/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const summary = paragraphs
+    .slice(1)
+    .find((part) =>
+      part.length >= 20 &&
+      part.length <= 260 &&
+      !/^(top relevant results|snippet|source|direct link|these results)/i.test(part)
+    );
+
+  return `Goal achieved: ${achievement}${summary ? `\n\nSummary: ${summary}` : ''}`;
 }
 
 async function fadeOutAndRemove(el, duration = 400) {
@@ -1491,7 +1711,9 @@ async function regenerateLastAssistantMessage(answerDiv) {
     const parsedResult = extractScreenExplanation(rawResult);
     const responseText = parsedResult.text || rawResult;
     const screenExplanation = parsedResult.callout;
-    const screenExplanations = parsedResult.callouts;
+    const screenExplanations = completeFullPageTour(
+      parsedResult.callouts || (latestIsFullPageWalkthrough && parsedResult.callout ? [parsedResult.callout] : null)
+    );
 
     if (isDeepThink) {
       let thinkingText = '';
@@ -1528,6 +1750,7 @@ async function regenerateLastAssistantMessage(answerDiv) {
       const newDiv = document.createElement('div');
       newDiv.className = 'message ai stream-text';
       newDiv.__screenExplanation = screenExplanation;
+      newDiv.__screenExplanations = screenExplanations;
       chatContainer.appendChild(newDiv);
       conversationHistory.push({ role: 'assistant', content: responseText });
       saveCurrentChat();
@@ -1540,6 +1763,7 @@ async function regenerateLastAssistantMessage(answerDiv) {
       const newDiv = document.createElement('div');
       newDiv.className = 'message ai stream-text';
       newDiv.__screenExplanation = screenExplanation;
+      newDiv.__screenExplanations = screenExplanations;
       chatContainer.appendChild(newDiv);
       conversationHistory.push({ role: 'assistant', content: responseText });
       saveCurrentChat();
@@ -1656,6 +1880,15 @@ async function processLLMResponse(userMessage, contextData, thinkingEl, images, 
 
 
 
+  const fullPageWalkthroughInstruction = latestIsFullPageWalkthrough
+    ? `
+FULL-PAGE WALKTHROUGH MODE:
+- The user asked for the whole visible page/screen. Use the VISIBLE PAGE OUTLINE as a checklist.
+- Explain all meaningful visible areas and controls in the answer: major headings, tabs, groups, rows/items, fields, and action buttons.
+- Do not stop after only 3 or 4 items unless the outline really only contains that many meaningful items.
+- If you add <screen_explanations>, include a broad tour of the page with 8-18 callouts when enough visible items exist. Use exact labels from the VISIBLE PAGE OUTLINE for each target.`
+    : '';
+
   const systemPrompt = deepThinkActive
     ? `You are Alvelika, a sophisticated and proactive AI research assistant. 
 You are "watching" the screen with the user. You receive both the page's text AND a screenshot of what they currently see.
@@ -1712,7 +1945,7 @@ CRITICAL INSTRUCTIONS:
 3. Inside <answer>, write your final response informed by all 12 answers above.
 4. PROVE YOU ARE WATCHING: If the page is relevant, mention a specific detail from the page (like the title, a name, or a fact).
 5. BE KIND & ELEGANT: Use Markdown (###, **, -) to make the answer beautiful. NO EMOJIS ALLOWED.
-6. FORMATTING DISCIPLINE: Use Markdown (###, **, -) for structure. You can highlight key terms using custom color tags: <red>text</red>, <green>text</green>, or <rose>text</rose>. Use these for emphasis or status. Do not use other HTML colors. Put important equations in display math with $$...$$, especially formulas that define a result or method.`
+6. FORMATTING DISCIPLINE: Use Markdown (###, **, -) for structure. You can highlight key terms using custom color tags: <red>text</red>, <green>text</green>, or <rose>text</rose>. Use these for emphasis or status. Do not use other HTML colors. Put important equations in display math with $$...$$, especially formulas that define a result or method.${fullPageWalkthroughInstruction}`
     : `You are Alvelika, a dedicated educational AI assistant designed to help students deeply understand documents and web pages.
 You are "watching" the screen with the student. You receive both the page's text AND a screenshot of what they currently see.
 You are part of a persistent chat session. The user may switch between normal chat and "Agent mode" (where you autonomously perform browser actions). The conversation history below contains ALL messages — including agent task requests, agent results, and agent interruptions. Use this history to understand what has happened so far.
@@ -1743,7 +1976,7 @@ FOR MULTIPLE ELEMENTS (e.g. \"explain this page\", \"walk me through this interf
 RULES FOR BOTH FORMATS:
 - "target" MUST be the exact visible text, button label, or aria-label (e.g. \"New chat\", \"Search\", \"Submit\"). NEVER use vague targets like \"left sidebar\", \"top menu\", \"the button\".
 - "body" must describe ONLY that specific element in 1–2 sentences. Do NOT paste your full answer into it.
-- If no visual annotation adds value, omit the block entirely.`;
+- If no visual annotation adds value, omit the block entirely.${fullPageWalkthroughInstruction}`;
 
   // Push user message into conversation history
   conversationHistory.push({ role: 'user', content: userContent });
@@ -1766,7 +1999,9 @@ RULES FOR BOTH FORMATS:
     const parsedResult = extractScreenExplanation(rawResult);
     const responseText = parsedResult.text || rawResult;
     const screenExplanation = parsedResult.callout;
-    const screenExplanations = parsedResult.callouts;
+    const screenExplanations = completeFullPageTour(
+      parsedResult.callouts || (latestIsFullPageWalkthrough && parsedResult.callout ? [parsedResult.callout] : null)
+    );
 
     if (isDeepThink) {
       let thinkingText = '';
@@ -1819,6 +2054,7 @@ RULES FOR BOTH FORMATS:
       const answerDiv = document.createElement('div');
       answerDiv.className = 'message ai stream-text';
       answerDiv.__screenExplanation = screenExplanation;
+      answerDiv.__screenExplanations = screenExplanations;
       chatContainer.appendChild(answerDiv);
       conversationHistory.push({ role: 'assistant', content: responseText });
       saveCurrentChat();
@@ -1833,6 +2069,7 @@ RULES FOR BOTH FORMATS:
       const answerDiv = document.createElement('div');
       answerDiv.className = 'message ai stream-text';
       answerDiv.__screenExplanation = screenExplanation;
+      answerDiv.__screenExplanations = screenExplanations;
       chatContainer.appendChild(answerDiv);
       conversationHistory.push({ role: 'assistant', content: responseText });
       saveCurrentChat();
@@ -1877,6 +2114,17 @@ async function scrapePageForAgent() {
     const injectionResults = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: () => {
+        function isExtensionElement(el) {
+          let cur = el;
+          while (cur) {
+            if (cur.hasAttribute && (cur.hasAttribute('data-alvelika-agent-overlay-host') || cur.hasAttribute('data-alvelika-screen-explanation-host'))) {
+              return true;
+            }
+            cur = cur.parentElement || (cur.getRootNode && cur.getRootNode().host);
+          }
+          return false;
+        }
+
         // ── Ad Detection ──
         const adSelectors = [
           'ytd-ad-slot-renderer', 'ytd-promoted-sparkles-web-renderer',
@@ -2024,8 +2272,12 @@ async function scrapePageForAgent() {
           '[role="checkbox"], [role="radio"], [contenteditable="true"]';
 
         function collectInteractive(root, collected) {
-          root.querySelectorAll(interactiveQuery).forEach(el => collected.add(el));
+          root.querySelectorAll(interactiveQuery).forEach(el => {
+            if (isExtensionElement(el)) return;
+            collected.add(el);
+          });
           root.querySelectorAll('*').forEach(el => {
+            if (isExtensionElement(el)) return;
             if (el.shadowRoot) collectInteractive(el.shadowRoot, collected);
           });
         }
@@ -2035,17 +2287,39 @@ async function scrapePageForAgent() {
         function collectFakeInteractive(root, collected, seen) {
           root.querySelectorAll('div, span, li, td, label, section').forEach(el => {
             if (seen.has(el)) return;
+            if (isExtensionElement(el)) return;
             const tag = el.tagName.toLowerCase();
             if (semanticInteractive.has(tag)) return;
             if (el.getAttribute('role')) return; // already has ARIA role, caught by main query
             const rect = el.getBoundingClientRect();
             if (rect.width === 0 && rect.height === 0) return;
-            const hasPointer = getComputedStyle(el).cursor === 'pointer';
+            const cs = getComputedStyle(el);
+            const hasPointer = cs.cursor === 'pointer';
             const hasOnclick = el.hasAttribute('onclick');
             const hasTabindex = el.hasAttribute('tabindex') && el.getAttribute('tabindex') !== '-1';
             if (hasPointer || hasOnclick || hasTabindex) {
               // Skip if a semantic interactive child exists (it's just a wrapper)
               if (el.querySelector('a, button, input, textarea, select, [role="button"], [role="link"]')) return;
+
+              // Skip if this element is only pointer-interactive (no explicit onclick/tabindex/role)
+              // AND it has an interactive ancestor.
+              const isOnlyPointer = !hasOnclick && !hasTabindex && !el.getAttribute('role');
+              if (isOnlyPointer) {
+                let parent = el.parentElement;
+                let hasInteractiveAncestor = false;
+                while (parent) {
+                  if (seen.has(parent) || 
+                      (parent.matches && typeof parent.matches === 'function' && parent.matches(interactiveQuery)) ||
+                      (parent.getAttribute && parent.getAttribute('role')) ||
+                      (parent.hasAttribute && (parent.hasAttribute('onclick') || parent.hasAttribute('tabindex')))) {
+                    hasInteractiveAncestor = true;
+                    break;
+                  }
+                  parent = parent.parentElement;
+                }
+                if (hasInteractiveAncestor) return;
+              }
+
               collected.add(el);
             }
           });
@@ -2067,8 +2341,29 @@ async function scrapePageForAgent() {
 
         function processElement(el, isFake) {
           const rect = el.getBoundingClientRect();
-          if (rect.width === 0 && rect.height === 0) return;
+          if (rect.width === 0 || rect.height === 0) return;
           if (isInsideAd(el)) return;
+
+          // Check if element or any ancestor is hidden/invisible
+          let cur = el;
+          let isHidden = false;
+          while (cur && cur !== document.documentElement) {
+            const cs = getComputedStyle(cur);
+            if (cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity || '1') < 0.1) {
+              isHidden = true;
+              break;
+            }
+            const parent = cur.parentElement;
+            if (!parent) {
+              const root = cur.getRootNode();
+              if (root && root.host) {
+                cur = root.host;
+                continue;
+              }
+            }
+            cur = parent;
+          }
+          if (isHidden) return;
 
           let role = getRole(el);
           if (!role && isFake) role = 'clickable';
@@ -2212,9 +2507,81 @@ async function clearAgentBadges() {
   }
 }
 
+async function waitForAgentPageSettled(tabId, timeoutMs = 10000) {
+  const startedAt = Date.now();
+  let lastSnapshot = null;
+  let stableSamples = 0;
+
+  await delay(300);
+
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      const results = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: () => {
+          const body = document.body;
+          const root = document.documentElement;
+          const text = body ? (body.innerText || '') : '';
+          const viewportArea = Math.max(1, window.innerWidth * window.innerHeight);
+          const pendingImages = Array.from(document.images).filter((img) => {
+            if (img.complete) return false;
+            const rect = img.getBoundingClientRect();
+            if (rect.width * rect.height < 600) return false;
+            if (rect.bottom < 0 || rect.right < 0 || rect.top > window.innerHeight || rect.left > window.innerWidth) return false;
+            return (rect.width * rect.height) / viewportArea > 0.002;
+          }).length;
+          const busyCount = document.querySelectorAll(
+            '[aria-busy="true"], [role="progressbar"], [class*="loading"], [class*="spinner"], [data-loading="true"]'
+          ).length;
+
+          return {
+            href: window.location.href,
+            readyState: document.readyState,
+            textLength: text.length,
+            nodeCount: document.querySelectorAll('*').length,
+            scrollHeight: root ? Math.round(root.scrollHeight || 0) : 0,
+            pendingImages,
+            busyCount
+          };
+        }
+      });
+
+      const snapshot = results && results[0] && results[0].result;
+      if (!snapshot) {
+        await delay(350);
+        continue;
+      }
+
+      const readyEnough = snapshot.readyState === 'complete' || snapshot.readyState === 'interactive';
+      const mediaReadyEnough = snapshot.pendingImages === 0 || Date.now() - startedAt > 4500;
+      const layoutStable = lastSnapshot &&
+        snapshot.href === lastSnapshot.href &&
+        Math.abs(snapshot.textLength - lastSnapshot.textLength) <= Math.max(30, Math.round(lastSnapshot.textLength * 0.04)) &&
+        Math.abs(snapshot.nodeCount - lastSnapshot.nodeCount) <= Math.max(8, Math.round(lastSnapshot.nodeCount * 0.03)) &&
+        Math.abs(snapshot.scrollHeight - lastSnapshot.scrollHeight) <= Math.max(40, Math.round(lastSnapshot.scrollHeight * 0.03));
+
+      if (readyEnough && mediaReadyEnough && layoutStable) {
+        stableSamples++;
+        if (stableSamples >= 2) return snapshot;
+      } else {
+        stableSamples = 0;
+      }
+
+      lastSnapshot = snapshot;
+    } catch (err) {
+      // The page may be between navigations. Give it a moment and sample again.
+      stableSamples = 0;
+    }
+
+    await delay(350);
+  }
+
+  return lastSnapshot;
+}
+
 // ─── Agent v2 — Set-of-Mark screenshot (numbered badges on visible interactive elements) ───
 async function captureAgentScreenshot() {
-  const result = { pageTitle: '', pageUrl: '', screenshot: null, idCount: 0 };
+  const result = { pageTitle: '', pageUrl: '', screenshot: null, idCount: 0, elementHints: '' };
 
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -2226,10 +2593,23 @@ async function captureAgentScreenshot() {
       return result;
     }
 
+    await waitForAgentPageSettled(tab.id);
+
     // 1. Hide Alvelika overlay + draw numbered badges on visible interactive elements
     const labelResults = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: () => {
+        function isExtensionElement(el) {
+          let cur = el;
+          while (cur) {
+            if (cur.hasAttribute && (cur.hasAttribute('data-alvelika-agent-overlay-host') || cur.hasAttribute('data-alvelika-screen-explanation-host'))) {
+              return true;
+            }
+            cur = cur.parentElement || (cur.getRootNode && cur.getRootNode().host);
+          }
+          return false;
+        }
+
         // Hide Alvelika activity overlay so it doesn't bleed into the screenshot
         const overlayHost = document.querySelector('[data-alvelika-agent-overlay-host]');
         if (overlayHost) overlayHost.style.display = 'none';
@@ -2256,6 +2636,109 @@ async function captureAgentScreenshot() {
           return false;
         };
 
+        function cleanText(value) {
+          return String(value || '').replace(/\s+/g, ' ').trim();
+        }
+
+        function getElementRole(el) {
+          const explicit = el.getAttribute('role');
+          if (explicit) return explicit;
+          const tag = el.tagName.toLowerCase();
+          const type = (el.getAttribute('type') || '').toLowerCase();
+
+          if (tag === 'a') return 'link';
+          if (tag === 'button') return 'button';
+          if (tag === 'textarea') return 'textbox';
+          if (tag === 'select') return 'combobox';
+          if (tag === 'summary') return 'button';
+          if (tag === 'input') {
+            if (type === 'search') return 'searchbox';
+            if (['button', 'submit', 'reset'].includes(type)) return 'button';
+            if (type === 'checkbox') return 'checkbox';
+            if (type === 'radio') return 'radio';
+            return 'textbox';
+          }
+          if (el.isContentEditable) return 'textbox';
+          return 'clickable';
+        }
+
+        function getElementLabel(el) {
+          const direct = [
+            el.getAttribute('aria-label'),
+            el.getAttribute('title'),
+            el.getAttribute('placeholder'),
+            el.getAttribute('alt')
+          ].map(cleanText).find(Boolean);
+          if (direct) return direct;
+
+          const labelledBy = el.getAttribute('aria-labelledby');
+          if (labelledBy) {
+            const joined = labelledBy
+              .split(/\s+/)
+              .map(id => cleanText(document.getElementById(id)?.textContent))
+              .filter(Boolean)
+              .join(' ');
+            if (joined) return joined;
+          }
+
+          if (el.id) {
+            const label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+            const labelText = cleanText(label?.textContent);
+            if (labelText) return labelText;
+          }
+
+          const text = cleanText(el.innerText || el.textContent);
+          return text.length > 100 ? text.substring(0, 97).trim() + '...' : text;
+        }
+
+        function isTextEntry(el, role) {
+          const tag = el.tagName.toLowerCase();
+          const type = (el.getAttribute('type') || 'text').toLowerCase();
+          return role === 'searchbox' ||
+            role === 'textbox' ||
+            role === 'combobox' ||
+            tag === 'textarea' ||
+            el.isContentEditable ||
+            (tag === 'input' && !['button', 'submit', 'reset', 'checkbox', 'radio', 'hidden', 'file', 'image'].includes(type));
+        }
+
+        function scoreElement(el, rect, role, label) {
+          const tag = el.tagName.toLowerCase();
+          const lowerLabel = label.toLowerCase();
+          const textEntry = isTextEntry(el, role);
+          const area = rect.width * rect.height;
+          const viewportArea = Math.max(1, window.innerWidth * window.innerHeight);
+          let score = 0;
+
+          if (textEntry) score += 120;
+          if (role === 'searchbox') score += 70;
+          if (role === 'textbox' || role === 'combobox') score += 40;
+          if (role === 'button' || tag === 'button') score += 55;
+          if (role === 'link' || tag === 'a') score += 45;
+          if (['tab', 'menuitem', 'option', 'switch', 'checkbox', 'radio'].includes(role)) score += 35;
+          if (label) score += 28;
+          else score -= 28;
+          if (/\b(search|find|query|submit|go|next|continue|sign in|login|send)\b/i.test(lowerLabel)) score += 28;
+          if (el.closest('form, search, [role="search"]')) score += 22;
+          if (el.closest('main, [role="main"], #contents, #primary, #main, ytd-search, ytd-watch-flexy')) score += 35;
+          if (el.closest('nav, header, [role="banner"], [role="navigation"]')) score -= 15;
+          if (document.activeElement === el) score += 20;
+          if (rect.top < window.innerHeight * 0.7) score += 8;
+          if (area / viewportArea > 0.24 && !textEntry) score -= 38;
+          if (['div', 'span', 'section', 'li', 'td', 'label'].includes(tag) && role === 'clickable') score -= 26;
+          if (el.children.length > 4 && !textEntry) score -= 18;
+          if (label.length > 90 && !textEntry) score -= 10;
+
+          return score;
+        }
+
+        function toElementHint(item, id) {
+          const r = item.rect;
+          const bounds = `${Math.round(r.left)},${Math.round(r.top)},${Math.round(r.width)}x${Math.round(r.height)}`;
+          const name = item.label ? ` "${item.label.substring(0, 80)}"` : '';
+          return `[${id}] ${item.role}${name} bounds=[${bounds}]`;
+        }
+
         // ── Collect interactive elements (semantic + fake/div-soup) ──
         const interactiveQuery =
           'input:not([type="hidden"]), textarea, select, button, [role="button"], ' +
@@ -2265,8 +2748,12 @@ async function captureAgentScreenshot() {
 
         const interactiveSet = new Set();
         function collectInteractive(root) {
-          root.querySelectorAll(interactiveQuery).forEach(el => interactiveSet.add(el));
+          root.querySelectorAll(interactiveQuery).forEach(el => {
+            if (isExtensionElement(el)) return;
+            interactiveSet.add(el);
+          });
           root.querySelectorAll('*').forEach(el => {
+            if (isExtensionElement(el)) return;
             if (el.shadowRoot) collectInteractive(el.shadowRoot);
           });
         }
@@ -2275,6 +2762,7 @@ async function captureAgentScreenshot() {
         const semanticInteractive = new Set(['a', 'button', 'input', 'textarea', 'select', 'summary', 'details']);
         document.querySelectorAll('div, span, li, td, label, section').forEach(el => {
           if (interactiveSet.has(el)) return;
+          if (isExtensionElement(el)) return;
           if (semanticInteractive.has(el.tagName.toLowerCase())) return;
           if (el.getAttribute('role')) return;
           const rect = el.getBoundingClientRect();
@@ -2283,8 +2771,36 @@ async function captureAgentScreenshot() {
           const hasPointer = cs.cursor === 'pointer';
           const hasOnclick = el.hasAttribute('onclick');
           const hasTabindex = el.hasAttribute('tabindex') && el.getAttribute('tabindex') !== '-1';
-          if (hasPointer || hasOnclick || hasTabindex) {
+          const label = cleanText(el.getAttribute('aria-label') || el.getAttribute('title') || el.innerText || el.textContent);
+          const compactNamedPointer = hasPointer &&
+            label.length >= 2 &&
+            label.length <= 80 &&
+            rect.width <= 360 &&
+            rect.height <= 100 &&
+            (rect.width * rect.height) / Math.max(1, window.innerWidth * window.innerHeight) <= 0.08;
+
+          if (hasOnclick || hasTabindex || compactNamedPointer) {
             if (el.querySelector('a, button, input, textarea, select, [role="button"], [role="link"]')) return;
+
+            // Skip if this element is only pointer-interactive (no explicit onclick/tabindex/role)
+            // AND it has an interactive ancestor.
+            const isOnlyPointer = !hasOnclick && !hasTabindex && !el.getAttribute('role');
+            if (isOnlyPointer) {
+              let parent = el.parentElement;
+              let hasInteractiveAncestor = false;
+              while (parent) {
+                if (interactiveSet.has(parent) ||
+                    (parent.matches && typeof parent.matches === 'function' && parent.matches(interactiveQuery)) ||
+                    (parent.getAttribute && parent.getAttribute('role')) ||
+                    (parent.hasAttribute && (parent.hasAttribute('onclick') || parent.hasAttribute('tabindex')))) {
+                  hasInteractiveAncestor = true;
+                  break;
+                }
+                parent = parent.parentElement;
+              }
+              if (hasInteractiveAncestor) return;
+            }
+
             interactiveSet.add(el);
           }
         });
@@ -2301,19 +2817,47 @@ async function captureAgentScreenshot() {
           // Skip elements too small to read a badge on
           if (rect.width < 12 || rect.height < 12) return;
           if (rect.bottom < 0 || rect.top > vh || rect.right < 0 || rect.left > vw) return;
-          const cs = getComputedStyle(el);
-          if (cs.visibility === 'hidden' || cs.display === 'none' || cs.opacity === '0') return;
+
+          // Check if element or any ancestor is hidden/invisible
+          let cur = el;
+          let isHidden = false;
+          while (cur && cur !== document.documentElement) {
+            const cs = getComputedStyle(cur);
+            if (cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity || '1') < 0.1) {
+              isHidden = true;
+              break;
+            }
+            const parent = cur.parentElement;
+            if (!parent) {
+              const root = cur.getRootNode();
+              if (root && root.host) {
+                cur = root.host;
+                continue;
+              }
+            }
+            cur = parent;
+          }
+          if (isHidden) return;
+
           if (el.disabled) return;
           visible.push({ el, rect });
         });
 
-        // ── DEDUP 1: skip ancestor wrappers when a descendant is also interactive ──
-        // (e.g., <a><button>...</button></a> — keep only the leaf button)
+        // ── DEDUP 1: Smart nested interactive resolution ──
         const visibleSet = new Set(visible.map(v => v.el));
         visible = visible.filter(v => {
           for (const other of visibleSet) {
             if (other === v.el) continue;
-            if (v.el.contains(other) && other !== v.el) return false; // I am an ancestor of another interactive → drop me
+            
+            if (other.contains(v.el)) {
+              // I am a descendant of 'other'. If 'other' is an A or BUTTON, let the ancestor win. Drop me.
+              if (other.tagName === 'A' || other.tagName === 'BUTTON') return false;
+            }
+            
+            if (v.el.contains(other)) {
+              // I am an ancestor of 'other'. If I am NOT an A or BUTTON, let the descendant win. Drop me.
+              if (v.el.tagName !== 'A' && v.el.tagName !== 'BUTTON') return false;
+            }
           }
           return true;
         });
@@ -2343,15 +2887,40 @@ async function captureAgentScreenshot() {
         }
         visible = dedupedByRect;
 
-        // Sort reading order (top-to-bottom, left-to-right with row tolerance)
-        visible.sort((a, b) => {
+        function readingOrderCompare(a, b) {
           const ay = Math.round(a.rect.top / 20);
           const by = Math.round(b.rect.top / 20);
           if (ay !== by) return ay - by;
           return a.rect.left - b.rect.left;
+        }
+
+        const MAX_BADGES = 120;
+        const scored = visible.map(v => {
+          const role = getElementRole(v.el);
+          const label = getElementLabel(v.el);
+          const textEntry = isTextEntry(v.el, role);
+          return {
+            ...v,
+            role,
+            label,
+            textEntry,
+            score: scoreElement(v.el, v.rect, role, label)
+          };
         });
 
-        const capped = visible.slice(0, 150);
+        let capped = scored
+          .filter(item => item.score >= 18 || item.textEntry)
+          .sort((a, b) => {
+            if (b.score !== a.score) return b.score - a.score;
+            return (a.rect.width * a.rect.height) - (b.rect.width * b.rect.height);
+          })
+          .slice(0, MAX_BADGES)
+          .sort(readingOrderCompare);
+
+        if (capped.length === 0 && scored.length > 0) {
+          capped = scored.sort(readingOrderCompare).slice(0, Math.min(MAX_BADGES, scored.length));
+        }
+        const elementHints = capped.map((item, idx) => toElementHint(item, idx + 1)).join('\n');
 
         // Build id map (lives on window in extension's isolated world; persists across executeScript calls)
         if (!window.__alvelika) window.__alvelika = {};
@@ -2436,7 +3005,8 @@ async function captureAgentScreenshot() {
         return {
           title: document.title,
           url: window.location.href,
-          idCount: capped.length
+          idCount: capped.length,
+          elementHints
         };
       }
     });
@@ -2445,6 +3015,7 @@ async function captureAgentScreenshot() {
       result.pageTitle = labelResults[0].result.title;
       result.pageUrl = labelResults[0].result.url;
       result.idCount = labelResults[0].result.idCount;
+      result.elementHints = labelResults[0].result.elementHints || '';
     }
 
     // 2. Wait for paint
@@ -2458,12 +3029,14 @@ async function captureAgentScreenshot() {
       console.log('Could not capture screenshot:', err);
     }
 
-    // 4. Restore Alvelika overlay — KEEP badges visible for debugging.
-    //    They'll be cleared automatically at the start of the next captureAgentScreenshot call.
+    // 4. Restore Alvelika overlay and remove visual badges from the live page.
+    //    The idMap stays available for the next executeScript action.
     try {
       await chrome.scripting.executeScript({
         target: { tabId: tab.id },
         func: () => {
+          const badge = document.getElementById('__alvelika_badge_overlay__');
+          if (badge) badge.remove();
           const overlayHost = document.querySelector('[data-alvelika-agent-overlay-host]');
           if (overlayHost) overlayHost.style.display = '';
         }
@@ -2642,7 +3215,7 @@ function buildAgentSystemPromptV2(userGoal, whyHistory, lastFeedback, blockedAct
     : '\n\nDECISION HISTORY:\nThis is the first step. No previous decisions.';
 
   const feedbackBlock = lastFeedback
-    ? '\n\nLAST EXECUTION FEEDBACK (from the browser, ground truth):\n' + lastFeedback
+    ? '\n\nLAST EXECUTION FEEDBACK (from the browser, ground truth):\n' + lastFeedback + '\n(CRITICAL: "Success" here ONLY means the browser executed the action without crashing. You MUST look at the new screenshot and URL to verify the expected visual change actually happened! Do not blindly trust "success".)'
     : '\n\nLAST EXECUTION FEEDBACK:\nNo command has been executed yet.';
 
   const blockedBlock = blockedActions && blockedActions.length
@@ -2652,13 +3225,14 @@ function buildAgentSystemPromptV2(userGoal, whyHistory, lastFeedback, blockedAct
 
   return `You are Alvelika Agent — an autonomous AI that ACTS on web pages.
 
-You receive ONLY:
-- A SCREENSHOT of the current viewport. Every clickable / typeable element has a SMALL RED CIRCULAR BADGE drawn directly ON the element, showing an integer id. The badge always sits on top of the element it labels — never floating in empty space.
+You receive:
+- A SCREENSHOT of the current viewport. Important clickable / typeable elements have a SMALL RED CIRCULAR BADGE drawn directly ON the element, showing an integer id.
+- A COMPACT ELEMENT LIST using the same ids as the screenshot. Use this list whenever badges are visually crowded or hard to read.
 - The USER GOAL.
 - Your previous DECISION HISTORY.
 - The LAST EXECUTION FEEDBACK from the browser.
 
-You do NOT receive HTML, CSS selectors, accessibility text, or page text. The screenshot IS the source of truth.
+The screenshot gives spatial truth. The compact element list gives exact ids, roles, labels, and bounds. Use both together.
 
 USER GOAL: "${userGoal}"
 ${historyBlock}${feedbackBlock}${blockedBlock}
@@ -2672,14 +3246,14 @@ To act on an element, return its badge id. The program owns a map { id → eleme
 {
   "thinking": {
     "goal_achieved":     "Is the user's goal already fully achieved? YES or NO, and why.",
-    "previous_action":   "Did the previous action succeed (produce the effect I expected)? YES or NO, and why. Say N/A on the first step.",
+    "previous_action":   "Did the previous action visually succeed based on the NEW screenshot and URL? Do NOT say yes just because execution feedback said success. Did the expected effect actually happen? YES or NO, and why. Say N/A on the first step.",
     "screen_is_on_path": "Is this current screen the one that leads me to the goal? YES or NO, and why.",
     "target_choice":     "Given the user's goal, which badge id should I pick and why?",
     "action_choice":     "What is the best action type for that target and why?"
   },
   "direct_response": {
-    "action": "click | type | pressKey | scroll | navigate | wait | done",
-    "id":     <integer badge id from the screenshot — required for click / type; optional for pressKey; omit for scroll / navigate / wait / done>,
+    "action": "click | click_human | type | pressKey | scroll | navigate | wait | done",
+    "id":     <integer badge id from the screenshot / compact element list — required for click / type; optional for pressKey; omit for scroll / navigate / wait / done>,
     "value":  "<text to type | key name (Enter, Escape, Tab, ArrowDown, ArrowUp, ArrowLeft, ArrowRight, Backspace, Space, Delete) | 'up' or 'down' for scroll | URL for navigate | final answer or 'IMPOSSIBLE: <reason>' for done>"
   },
   "why_this_choice": "Free-form one-paragraph explanation of WHY you picked this exact id+action over the alternatives. This is saved and shown back to you next step, so be precise — write it for your future self."
@@ -2696,10 +3270,18 @@ To act on an element, return its badge id. The program owns a map { id → eleme
 - "wait":      Pause for the page to settle. Use sparingly.
 - "done":      Goal complete OR impossible. Put final answer / explanation in "value". Prefix with "IMPOSSIBLE: " if impossible.
 
+═══ COMPLETION MESSAGE STYLE ═══
+
+When the goal is achieved, "direct_response.value" must be short and user-facing:
+Goal achieved: <one sentence describing the actual user goal that was completed>
+Summary: <optional one-sentence summary of the useful final page/result>
+
+Do NOT dump visible search results, ids, snippets, or a page-observation report unless the user explicitly asked you to gather or summarize those results. For ordinary navigation/search/click tasks, just say what was completed and why the final page/resource should help.
+
 ═══ RULES ═══
 
-1. NEVER invent an id that is not visible as a red badge on the screenshot.
-2. If two badges are too close to read clearly, scroll or pick the one whose badge you can clearly identify.
+1. NEVER invent an id that is not in the compact element list and represented by a badge in the screenshot.
+2. If badges are visually crowded, rely on the compact element list to identify the correct id by role, label, and bounds.
 3. If the goal is achieved, immediately respond with action "done". However, if the user asks you to type/send a message, you MUST actually type and send a NEW message. Do NOT say 'goal achieved' just because a similar message was sent in the past.
 4. After 2 scrolls without progress, MUST attempt a click on the best available badge.
 5. If the LAST EXECUTION FEEDBACK shows the previous action failed, pick a DIFFERENT id — do NOT repeat the same id.
@@ -2804,7 +3386,7 @@ async function executeAgentCommandById(instruct) {
       await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
       await chrome.debugger.detach(target);
       await delay(2000);
-      return { success: true, description: `Native human-click on id ${badgeId} at (${x}, ${y})` };
+      return { success: true, description: `Native human-click on id ${id} at (${x}, ${y})` };
     } catch (err) {
       try { await chrome.debugger.detach({ tabId: tab.id }); } catch (e) {}
       return { success: false, error: `Debugger error: ${err.message}. Make sure debugger permission is granted.` };
@@ -3670,7 +4252,7 @@ async function handleAgentSend(userGoal) {
 
     if (!agentRunning) return;
 
-    // ═══ AGENT LOOP v2 (Set-of-Mark — screenshot only, no JS content) ═══
+    // ═══ AGENT LOOP v2 (Set-of-Mark + compact element list) ═══
     const whyHistory = []; // array of "why_this_choice" strings, one per step
     let lastFeedback = null;
     const actionFailureCounts = new Map();
@@ -3700,7 +4282,7 @@ async function handleAgentSend(userGoal) {
 
       // ── 1.5 Loop detection ──
       const currentUrl = page.pageUrl || '';
-      const normalizedUrl = currentUrl.split('?')[0].split('#')[0];
+      const normalizedUrl = currentUrl.split('#')[0];
       visitedUrls.set(normalizedUrl, (visitedUrls.get(normalizedUrl) || 0) + 1);
       if (normalizedUrl === lastPageUrl) stepsWithoutProgress++;
       else { stepsWithoutProgress = 0; lastPageUrl = normalizedUrl; }
@@ -3713,7 +4295,7 @@ async function handleAgentSend(userGoal) {
         loopWarning = `\n\n⚠️ STAGNATION DETECTED: ${stepsWithoutProgress} consecutive steps on the same page without progress. Take a decisive new action or declare IMPOSSIBLE.`;
       }
 
-      // ── 2. Build prompt (screenshot only — no DOM/HTML/text) ──
+      // ── 2. Build prompt (screenshot + compact element list) ──
       const systemPrompt = buildAgentSystemPromptV2(
         refinedGoal,
         whyHistory,
@@ -3728,7 +4310,8 @@ async function handleAgentSend(userGoal) {
             `Current page title: ${page.pageTitle}\n` +
             `Current page URL: ${page.pageUrl}\n` +
             `Number of badges drawn on the screenshot: ${page.idCount} (ids 1..${page.idCount})${loopWarning}\n\n` +
-            `Look at the screenshot. Each red circular badge marks an interactive element. Pick the badge id of your target.`
+            `Compact element list (same ids as badges):\n${page.elementHints || '(no labeled elements)'}\n\n` +
+            `Look at the screenshot for layout, then use the compact element list to choose the exact target id.`
         }
       ];
       if (page.screenshot) {
@@ -3774,10 +4357,11 @@ async function handleAgentSend(userGoal) {
       }
 
       // Append why to history (saved as string)
+      const actionDesc = `[Executed '${instruct.action}'${instruct.id != null ? ` on id ${instruct.id}` : ''} at ${normalizedUrl}]`;
       if (typeof parsed.why_this_choice === 'string' && parsed.why_this_choice.trim()) {
-        whyHistory.push(parsed.why_this_choice.trim());
+        whyHistory.push(`${actionDesc} - ${parsed.why_this_choice.trim()}`);
       } else {
-        whyHistory.push(`(no justification given) action=${instruct.action}${instruct.id != null ? ` id=${instruct.id}` : ''}`);
+        whyHistory.push(`${actionDesc} - (no justification given)`);
       }
 
       // ── 6. Show the command bubble ──
@@ -3794,7 +4378,7 @@ async function handleAgentSend(userGoal) {
 
       // ── 7. Done? ──
       if (String(instruct.action).toLowerCase() === 'done') {
-        const doneText = instruct.value || 'Goal completed.';
+        const doneText = formatAgentDoneMessage(refinedGoal, instruct.value);
         appendAIMessage(doneText, { stream: true });
         conversationHistory.push({ role: 'assistant', content: `[Agent completed] Goal: ${refinedGoal}\nResult: ${doneText}` });
         chrome.storage.local.set({ conversationHistory });
@@ -3813,6 +4397,7 @@ async function handleAgentSend(userGoal) {
             : actionType;
 
       let result;
+      const priorFailureCount = actionFailureCounts.get(sig) || 0;
 
       // Check if normal click has been tested twice
       if (actionType === 'click') {
@@ -3825,7 +4410,6 @@ async function handleAgentSend(userGoal) {
       }
 
       if (!result) {
-        const priorFailureCount = actionFailureCounts.get(sig) || 0;
         let blockedReason = blockedActions.get(sig) || null;
 
         if (priorFailureCount >= AGENT_MAX_ACTION_RETRIES) {

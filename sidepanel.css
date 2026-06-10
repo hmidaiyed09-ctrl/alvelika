@@ -186,7 +186,7 @@ body::before {
   gap: 4px;
 }
 
-#history-button, #clear-button, #settings-button {
+#history-button, #clear-button, #delete-chat-button, #settings-button {
   background: transparent;
   border: none;
   color: var(--text-muted);
@@ -205,8 +205,13 @@ body::before {
 }
 
 #clear-button:hover {
-  color: #f87171;
-  background: rgba(248, 113, 113, 0.08);
+  color: var(--secondary-bright);
+  background: var(--secondary-soft);
+}
+
+#delete-chat-button:hover {
+  color: #fb7185;
+  background: rgba(251, 113, 133, 0.1);
 }
 
 #settings-button:hover {

@@ -766,7 +766,7 @@ const screenExplanationOverlay = (() => {
     const coreNeedle = targetWords.join(' ');
     if (!needle || targetWords.length === 0) return null;
 
-    const candidates = Array.from(document.querySelectorAll([
+    const semanticCandidates = Array.from(document.querySelectorAll([
       'button',
       'a[href]',
       'input',
@@ -792,9 +792,9 @@ const screenExplanationOverlay = (() => {
     let bestScore = 0;
     const viewportArea = Math.max(1, window.innerWidth * window.innerHeight);
 
-    for (const el of candidates) {
+    function scoreCandidate(el, isBroadTextFallback = false) {
       const label = normalizeText(elementLabel(el));
-      if (!label) continue;
+      if (!label) return;
       const labelWords = wordsFrom(label);
 
       let score = 0;
@@ -807,6 +807,7 @@ const screenExplanationOverlay = (() => {
 
       const roleBoost = el.matches('button, a[href], input, textarea, select, summary, [role="button"], [role="link"], [role="menuitem"], [role="tab"]') ? 5 : 0;
       score += roleBoost;
+      if (isBroadTextFallback) score -= 7;
 
       const rect = el.getBoundingClientRect();
       if ((rect.width * rect.height) / viewportArea > 0.28) score -= 14;
@@ -814,6 +815,40 @@ const screenExplanationOverlay = (() => {
       if (score > bestScore) {
         best = el;
         bestScore = score;
+      }
+    }
+
+    for (const el of semanticCandidates) {
+      scoreCandidate(el, false);
+    }
+
+    if (bestScore < 72) {
+      const broadCandidates = Array.from(document.querySelectorAll([
+        'div',
+        'span',
+        'section',
+        'article',
+        'tr',
+        'td',
+        '[class*="task"]',
+        '[class*="row"]',
+        '[data-testid]'
+      ].join(',')))
+        .filter(isVisible)
+        .filter((el) => {
+          const label = normalizeText(elementLabel(el));
+          if (!label || label.length > 220) return false;
+          return label === needle || label.includes(needle) || (coreNeedle && label.includes(coreNeedle));
+        })
+        .sort((a, b) => {
+          const ra = a.getBoundingClientRect();
+          const rb = b.getBoundingClientRect();
+          return (ra.width * ra.height) - (rb.width * rb.height);
+        })
+        .slice(0, 80);
+
+      for (const el of broadCandidates) {
+        scoreCandidate(el, true);
       }
     }
 
